@@ -190,11 +190,12 @@ static inline union mv mv_projection(const union mv mv, const int num, const int
     };
 }
 
-static void add_temporal_candidate(const refmvs_frame *const rf,
-                                   refmvs_candidate *const mvstack, int *const cnt,
-                                   const refmvs_temporal_block *const rb,
-                                   const union refmvs_refpair ref, int *const globalmv_ctx,
-                                   const union mv gmv[])
+static ALWAYS_INLINE void
+add_temporal_candidate(const refmvs_frame *const rf,
+                       refmvs_candidate *const mvstack, int *const cnt,
+                       const refmvs_temporal_block *const rb,
+                       const union refmvs_refpair ref, int *const globalmv_ctx,
+                       const union mv gmv[])
 {
     if (rb->mv.n == INVALID_MV) return;
 
