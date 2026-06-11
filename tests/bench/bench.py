@@ -235,6 +235,8 @@ def cmd_counters(args):
                    "--branch-sim=yes", f"--cachegrind-out-file={tmp.name}",
                    args.dav1d, "-q", "-i", path, "--muxer", "null",
                    "--threads", "1", "-l", str(limit)]
+            if args.cpumask is not None:
+                cmd += ["--cpumask", str(args.cpumask)]
             r = run(cmd)
             if r.returncode != 0:
                 print(f"{clip}: valgrind failed: {r.stderr[-300:]}")
@@ -353,6 +355,8 @@ def main():
     n.add_argument("--limit", type=int, default=60,
                    help="max frames per clip (valgrind is ~30x slower)")
     n.add_argument("--clip", help="only clips whose name contains this")
+    n.add_argument("--cpumask", type=int, default=None,
+                   help="e.g. 0 to measure the pure-C path")
     n.add_argument("--out", help="write JSON results here")
 
     f = sub.add_parser("profile")
