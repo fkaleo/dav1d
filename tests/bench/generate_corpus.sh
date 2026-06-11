@@ -52,4 +52,26 @@ enc motion-720p-8bit        "life=s=1280x720:rate=30:mold=10:ratio=0.15" 240 yuv
 enc lowbr-480p-8bit         "testsrc2=s=854x480:r=30,noise=alls=20:allf=t" 300 yuv420p   55 ""
 enc uhd-2160p-8bit          "mandelbrot=s=3840x2160:r=30"              120 yuv420p       35 ""
 
+# Frame super-resolution stresses the resize branches in the CDEF and
+# loop-restoration glue that no other clip reaches. SVT-AV1 does not
+# implement superres, so this clip needs aomenc and is optional.
+if command -v aomenc >/dev/null 2>&1; then
+    if [ ! -f "$OUT/superres-720p-8bit.ivf" ]; then
+        echo "encoding: superres-720p-8bit.ivf"
+        tmpy4m=$(mktemp --suffix=.y4m)
+        "$FFMPEG" -y -hide_banner -loglevel error \
+            -f lavfi -i "testsrc2=s=1280x720:r=30" -frames:v 60 \
+            -pix_fmt yuv420p -f yuv4mpegpipe "$tmpy4m"
+        aomenc --ivf -o "$OUT/superres-720p-8bit.ivf" --cpu-used=8 \
+            --end-usage=q --cq-level=40 --superres-mode=1 \
+            --superres-denominator=12 --enable-restoration=1 --threads=4 \
+            "$tmpy4m" >/dev/null 2>&1
+        rm -f "$tmpy4m"
+    else
+        echo "exists: superres-720p-8bit.ivf"
+    fi
+else
+    echo "skipping superres clip (aomenc not found)"
+fi
+
 echo "corpus ready in $OUT"
