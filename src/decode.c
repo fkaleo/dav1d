@@ -73,7 +73,7 @@ static void init_quant_tables(const Dav1dSequenceHeader *const seq_hdr,
     }
 }
 
-static int read_mv_component_diff(MsacContext *const msac,
+static ALWAYS_INLINE int read_mv_component_diff(MsacContext *const msac,
                                   CdfMvComponent *const mv_comp,
                                   const int mv_prec)
 {
@@ -442,7 +442,7 @@ static void read_pal_indices(Dav1dTaskContext *const t,
                                  w4 * 4, h4 * 4);
 }
 
-static void read_vartx_tree(Dav1dTaskContext *const t,
+static ALWAYS_INLINE void read_vartx_tree(Dav1dTaskContext *const t,
                             Av1Block *const b, const enum BlockSize bs,
                             const int bx4, const int by4)
 {
