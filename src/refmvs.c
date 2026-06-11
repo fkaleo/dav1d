@@ -238,7 +238,8 @@ add_temporal_candidate(const refmvs_frame *const rf,
     }
 }
 
-static void add_compound_extended_candidate(refmvs_candidate *const same,
+static ALWAYS_INLINE void
+add_compound_extended_candidate(refmvs_candidate *const same,
                                             int *const same_count,
                                             const refmvs_block *const cand_b,
                                             const int sign0, const int sign1,
@@ -295,7 +296,8 @@ static void add_compound_extended_candidate(refmvs_candidate *const same,
     }
 }
 
-static void add_single_extended_candidate(refmvs_candidate mvstack[8], int *const cnt,
+static ALWAYS_INLINE void
+add_single_extended_candidate(refmvs_candidate mvstack[8], int *const cnt,
                                           const refmvs_block *const cand_b,
                                           const int sign, const uint8_t *const sign_bias)
 {
