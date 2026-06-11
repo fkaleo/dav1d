@@ -75,3 +75,25 @@ python3 tests/bench/bench.py compare before-counters.json after-counters.json
   validating individual SIMD kernels when network access to
   code.videolan.org is available; this harness complements it with
   whole-decoder, whole-stream checks.
+
+## Recommended release build flags (for packagers/CI)
+
+PGO and LTO combined measured −1.8…−3.7% instructions/frame and
+−18…−43% L1i misses versus a plain `-O3` build of the same sources
+(bit-exact output; see reports/). Recipe:
+
+```sh
+meson setup build --buildtype release -Db_lto=true -Db_pgo=generate
+ninja -C build
+# train on representative content, e.g. the corpus at 1 and N threads
+for c in tests/bench/data/corpus/*.ivf; do
+    build/tools/dav1d -q -i "$c" --muxer null --threads 1 -l 60
+    build/tools/dav1d -q -i "$c" --muxer null --threads 4 -l 60
+done
+meson configure build -Db_pgo=use && ninja -C build
+# IMPORTANT: confirm instrumentation is gone and profiles matched:
+nm build/src/libdav1d.so* | grep -c gcov   # must print 0
+```
+
+If sources changed since training, gcc fails with coverage-mismatch
+errors: retrain rather than suppressing the error.
