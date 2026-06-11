@@ -74,4 +74,34 @@ else
     echo "skipping superres clip (aomenc not found)"
 fi
 
+# Real-content clips: raw camera/screen sources from the public
+# aom-test-data bucket, encoded locally like the synthetic ones. These
+# complement the synthetic corpus with natural noise, motion and texture
+# statistics (the synthetic clips remain for reproducibility when the
+# bucket is unreachable).
+AOM_DATA="https://storage.googleapis.com/aom-test-data"
+
+enc_real() {
+    name=$1; srcfile=$2; frames=$3; pixfmt=$4; crf=$5
+    if [ -f "$OUT/$name.ivf" ]; then
+        echo "exists: $name.ivf"
+        return
+    fi
+    echo "encoding: $name.ivf (source: $srcfile)"
+    tmpsrc=$(mktemp --suffix=".${srcfile##*.}")
+    curl -sf -o "$tmpsrc" "$AOM_DATA/$srcfile" || { rm -f "$tmpsrc"; \
+        echo "skipping $name (download failed)"; return; }
+    "$FFMPEG" -y -hide_banner -loglevel error \
+        -i "$tmpsrc" -frames:v "$frames" -pix_fmt "$pixfmt" \
+        -c:v libsvtav1 -preset "$PRESET" -crf "$crf" \
+        -svtav1-params "keyint=120" "$OUT/$name.ivf"
+    rm -f "$tmpsrc"
+}
+
+# name                       source                        frames fmt         crf
+enc_real real-niklas-720p-8bit    niklas_1280_720_30.y4m      240 yuv420p      35
+enc_real real-crowdrun-360p-10bit crowd_run_360p_10_150f.y4m  150 yuv420p10le  35
+enc_real real-screen-1080p-8bit   screendata.1920_1080.y4m    120 yuv420p      40
+enc_real real-rushhour-288p-8bit rush_hour_444.y4m           120 yuv420p      32
+
 echo "corpus ready in $OUT"
