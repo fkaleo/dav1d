@@ -126,6 +126,35 @@ void bytefn(dav1d_cdef_brow)(Dav1dTaskContext *const tc,
         const int by_idx = (by & 30) >> 1;
         if (by + 2 >= f->bh) edges &= ~CDEF_HAVE_BOTTOM;
 
+        // The top/bottom neighbour row pointers depend only on the sbrow
+        // and plane, never on the block position within the row, so hoist
+        // their selection out of the per-block loop. All cases reduce to
+        // a per-row base pointer plus the block's x offset.
+        const pixel *top_base[3], *bot_base[3];
+        const int n_planes = layout != DAV1D_PIXEL_LAYOUT_I400 ? 3 : 1;
+        for (int pl = 0; pl < n_planes; pl++) {
+            const ptrdiff_t stride = pl ? uv_stride : y_stride;
+            top_base[pl] = &f->lf.cdef_line[tf][pl]
+                           [have_tt * (sby * (pl ? 8 : 4) * stride)];
+            bot_base[pl] = ptrs[pl] + ((pl ? 8 >> ss_ver : 8) * stride);
+            if (!have_tt) continue;
+            if (sbrow_start && by == by_start) {
+                if (resize) {
+                    top_base[pl] = &f->lf.cdef_lpf_line[pl][(sby - 1) * 4 * stride];
+                } else {
+                    const int line = sby * (4 << sb128) - 4;
+                    top_base[pl] = &f->lf.lr_lpf_line[pl][line * stride];
+                }
+            } else if (!sbrow_start && by + 2 >= by_end) {
+                if (resize) {
+                    bot_base[pl] = &f->lf.cdef_lpf_line[pl][(sby * 4 + 2) * stride];
+                } else {
+                    const int line = sby * (4 << sb128) + 4 * sb128 + 2;
+                    bot_base[pl] = &f->lf.lr_lpf_line[pl][line * stride];
+                }
+            }
+        }
+
         if ((!have_tt || sbrow_start || by + 2 < by_end) &&
             edges & CDEF_HAVE_BOTTOM)
         {
@@ -205,35 +234,8 @@ void bytefn(dav1d_cdef_brow)(Dav1dTaskContext *const tc,
                     dir = dsp->cdef.dir(bptrs[0], f->cur.stride[0],
                                         &variance HIGHBD_CALL_SUFFIX);
 
-                const pixel *top, *bot;
-                ptrdiff_t offset;
-
-                if (!have_tt) goto st_y;
-                if (sbrow_start && by == by_start) {
-                    if (resize) {
-                        offset = (sby - 1) * 4 * y_stride + bx * 4;
-                        top = &f->lf.cdef_lpf_line[0][offset];
-                    } else {
-                        offset = (sby * (4 << sb128) - 4) * y_stride + bx * 4;
-                        top = &f->lf.lr_lpf_line[0][offset];
-                    }
-                    bot = bptrs[0] + 8 * y_stride;
-                } else if (!sbrow_start && by + 2 >= by_end) {
-                    top = &f->lf.cdef_line[tf][0][sby * 4 * y_stride + bx * 4];
-                    if (resize) {
-                        offset = (sby * 4 + 2) * y_stride + bx * 4;
-                        bot = &f->lf.cdef_lpf_line[0][offset];
-                    } else {
-                        const int line = sby * (4 << sb128) + 4 * sb128 + 2;
-                        offset = line * y_stride + bx * 4;
-                        bot = &f->lf.lr_lpf_line[0][offset];
-                    }
-                } else {
-            st_y:;
-                    offset = sby * 4 * y_stride;
-                    top = &f->lf.cdef_line[tf][0][have_tt * offset + bx * 4];
-                    bot = bptrs[0] + 8 * y_stride;
-                }
+                const pixel *const top = top_base[0] + bx * 4;
+                const pixel *const bot = bot_base[0] + bx * 4;
                 if (y_pri_lvl) {
                     const int adj_y_pri_lvl = adjust_strength(y_pri_lvl, variance);
                     if (adj_y_pri_lvl || y_sec_lvl)
@@ -250,37 +252,10 @@ void bytefn(dav1d_cdef_brow)(Dav1dTaskContext *const tc,
 
                 const int uvdir = uv_pri_lvl ? uv_dir[dir] : 0;
                 for (int pl = 1; pl <= 2; pl++) {
-                    if (!have_tt) goto st_uv;
-                    if (sbrow_start && by == by_start) {
-                        if (resize) {
-                            offset = (sby - 1) * 4 * uv_stride + (bx * 4 >> ss_hor);
-                            top = &f->lf.cdef_lpf_line[pl][offset];
-                        } else {
-                            const int line = sby * (4 << sb128) - 4;
-                            offset = line * uv_stride + (bx * 4 >> ss_hor);
-                            top = &f->lf.lr_lpf_line[pl][offset];
-                        }
-                        bot = bptrs[pl] + (8 >> ss_ver) * uv_stride;
-                    } else if (!sbrow_start && by + 2 >= by_end) {
-                        const ptrdiff_t top_offset = sby * 8 * uv_stride +
-                                                     (bx * 4 >> ss_hor);
-                        top = &f->lf.cdef_line[tf][pl][top_offset];
-                        if (resize) {
-                            offset = (sby * 4 + 2) * uv_stride + (bx * 4 >> ss_hor);
-                            bot = &f->lf.cdef_lpf_line[pl][offset];
-                        } else {
-                            const int line = sby * (4 << sb128) + 4 * sb128 + 2;
-                            offset = line * uv_stride + (bx * 4 >> ss_hor);
-                            bot = &f->lf.lr_lpf_line[pl][offset];
-                        }
-                    } else {
-                st_uv:;
-                        const ptrdiff_t offset = sby * 8 * uv_stride;
-                        top = &f->lf.cdef_line[tf][pl][have_tt * offset + (bx * 4 >> ss_hor)];
-                        bot = bptrs[pl] + (8 >> ss_ver) * uv_stride;
-                    }
                     dsp->cdef.fb[uv_idx](bptrs[pl], f->cur.stride[1],
-                                         lr_bak[bit][pl], top, bot,
+                                         lr_bak[bit][pl],
+                                         top_base[pl] + (bx * 4 >> ss_hor),
+                                         bot_base[pl] + (bx * 4 >> ss_hor),
                                          uv_pri_lvl, uv_sec_lvl, uvdir,
                                          damping - 1, edges HIGHBD_CALL_SUFFIX);
                 }
