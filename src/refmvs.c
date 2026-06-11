@@ -95,7 +95,7 @@ add_spatial_candidate(refmvs_candidate *const mvstack, int *const cnt,
     }
 }
 
-static int scan_row(refmvs_candidate *const mvstack, int *const cnt,
+static ALWAYS_INLINE int scan_row(refmvs_candidate *const mvstack, int *const cnt,
                     const union refmvs_refpair ref, const mv gmv[2],
                     const refmvs_block *b, const int bw4, const int w4,
                     const int max_rows, const int step,
@@ -134,7 +134,7 @@ static int scan_row(refmvs_candidate *const mvstack, int *const cnt,
     }
 }
 
-static int scan_col(refmvs_candidate *const mvstack, int *const cnt,
+static ALWAYS_INLINE int scan_col(refmvs_candidate *const mvstack, int *const cnt,
                     const union refmvs_refpair ref, const mv gmv[2],
                     /*const*/ refmvs_block *const *b, const int bh4, const int h4,
                     const int bx4, const int max_cols, const int step,
