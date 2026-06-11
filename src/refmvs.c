@@ -38,7 +38,8 @@
 #include "src/mem.h"
 #include "src/refmvs.h"
 
-static void add_spatial_candidate(refmvs_candidate *const mvstack, int *const cnt,
+static ALWAYS_INLINE void
+add_spatial_candidate(refmvs_candidate *const mvstack, int *const cnt,
                                   const int weight, const refmvs_block *const b,
                                   const union refmvs_refpair ref, const mv gmv[2],
                                   int *const have_newmv_match,
