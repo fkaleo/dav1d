@@ -43,7 +43,31 @@ jobs:
         run: |
           python3 tests/bench/bench.py counters --limit 20 --clip 1080p \
             --out counters-${{ matrix.os }}.json
+      # Build upstream master with the same config and re-run the gate and
+      # counters against the same corpus on the same runner: corpus verify
+      # cross-checks the two builds bit-exact, and the counter diff is the
+      # patch-series delta per platform.
+      - name: baseline (master) gate + counters
+        run: |
+          git fetch --depth 1 origin master
+          git worktree add /tmp/master FETCH_HEAD
+          cp -r subprojects/checkasm /tmp/master/subprojects/
+          meson setup build-master /tmp/master --buildtype release \
+            -Ddebug=true -Dtrim_dsp=false -Dtestdata_tests=false
+          ninja -C build-master tools/dav1d
+          python3 tests/bench/bench.py --dav1d build-master/tools/dav1d check
+          python3 tests/bench/bench.py --dav1d build-master/tools/dav1d \
+            counters --limit 20 --clip 1080p \
+            --out counters-master-${{ matrix.os }}.json
+      - name: compare (master -> branch)
+        run: |
+          python3 tests/bench/bench.py compare \
+            counters-master-${{ matrix.os }}.json \
+            counters-${{ matrix.os }}.json \
+            | tee compare-${{ matrix.os }}.txt
       - uses: actions/upload-artifact@v4
         with:
           name: counters-${{ matrix.os }}
-          path: counters-*.json
+          path: |
+            counters-*.json
+            compare-*.txt
