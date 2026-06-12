@@ -24,6 +24,16 @@ done (see cross-references below); load_tmvs returns to the top.
    a lazy-projection alternative is ruled out by the usage census.
    This needs an algorithm-level rethink of the projection loop, not
    peephole SIMD.
+   *2026-06-12 round 1 (see 2026-06-12-load-tmvs-rework.md)*: the
+   C-level rethink is measured out — a bit-exact run/span restructure
+   wins −12% on screen content but loses +17% on dense motion (the
+   scalar loop is latency-bound at ~3 cycles/cell, IPC 4.3; OoO
+   already hides what restructuring removes) and was rejected; a
+   skip-LUT subset (−4% screen / −1.6% dense, C path) landed. The
+   remaining prize is the SIMD rework with per-16-cell vector
+   skip-scan/run-find/pattern-store (design and cycle budget in the
+   report): ~3-4x kernel on cheap content, ~1.3-1.5x dense, on both
+   NEON and x86.
 2. **Sparse-eob fast path for AVX-512 identity itx kernels** — gap
    proven (flat ~127 cycles at all eob vs AVX2's 34→152 scaling), but
    low priority: large IDTX blocks are nearly absent in real streams.
