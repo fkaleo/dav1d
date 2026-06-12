@@ -72,9 +72,13 @@ python3 tests/bench/bench.py compare before-counters.json after-counters.json
   any particular streaming service; validate headline claims on real content
   before publishing them.
 - `checkasm` (the upstream SIMD unit test) is the preferred tool for
-  validating individual SIMD kernels when network access to
-  code.videolan.org is available; this harness complements it with
-  whole-decoder, whole-stream checks.
+  validating and benchmarking individual SIMD kernels; this harness
+  complements it with whole-decoder, whole-stream checks. If
+  code.videolan.org is unreachable, the framework subproject can be
+  fetched from the GitHub mirror instead:
+  `curl -L https://codeload.github.com/haasn/checkasm/tar.gz/refs/tags/v1.2.0 | tar xz -C subprojects && mv subprojects/checkasm-1.2.0 subprojects/checkasm`
+  then reconfigure with `-Dtrim_dsp=false` and build the
+  `tests/checkasm` target.
 
 ## Recommended release build flags (for packagers/CI)
 

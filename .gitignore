@@ -9,3 +9,4 @@ tags
 *.snap
 /tools/output/xxhash.h
 /subprojects/.wraplock
+/subprojects/checkasm/
