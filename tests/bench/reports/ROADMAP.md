@@ -78,3 +78,28 @@ Micro-inlining (mined to ~0.1% finds; never inline into decode_b —
 I-cache), scalar C DSP rewrites (compiler already optimal: see
 cdef_find_dir_c rejection), msac asm (serial floor 1.03–1.75x), lazy
 load_tmvs (usage census), itx AVX-512 pointer swaps (workload census).
+
+## Cross-references to upstream GitLab performance issues
+
+- **#395 (worker mutex contention)**: upstream reports degradation
+  beyond ~16 cores; our measurement extends this to the low end —
+  even at 4 threads, sub-3ms/frame streams run +12.7% instructions
+  and slower than 1 thread. Ronald's issue comment contains a design
+  (temporary-master + parked-thread lock + atomic progress); the
+  harness here is the regression test for implementing it.
+- **#316 (AVX-512)**: whole-decoder effect of the completed work is
+  +0..+2.3% over AVX2 on Ice Lake (this report); the identity itx
+  kernels from !1301 lose to AVX2 below eob~16 (missing sparse fast
+  path); generate_grain_* is AVX2-only despite the checklist wording
+  (verified in filmgrain_avx512.asm — only fgy/fguv apply kernels).
+- **#305 (CDEF 8-bit fully-edged, SSSE3 TODO)**: measured here at
+  --cpumask ssse3 on 1080p film content: cdef_filter_8x8 12.8% +
+  4x4 4.6% + dir 4.4% = ~21.7% of decode on AVX2-less x86 — the
+  highest-certainty remaining item for commodity hardware.
+- **#403 (SVE2)**: Martin Storsjo's skepticism (128-bit SVE2 rarely
+  beats NEON; single-function ports seldom useful) matches the
+  AVX-512 and load_tmvs findings here; treat SVE2 as
+  measure-first.
+- Gap in upstream tracking: no issue covers the memory-traffic class
+  (cf. patches 8/10 here: L1d -12..-37%, LL -41..-82%) or build
+  configuration (PGO/LTO: a further -1.8..-3.7% instr, -16% size).
