@@ -5,6 +5,11 @@ Consolidated from the measurement sessions recorded in
 
 ## Assembly work (tooled: checkasm runs in this environment, see README)
 
+Priorities re-ranked 2026-06-12 after reviewing the upstream
+performance-issue inventory (#305/#316/#395/#403): #305 SSSE3 was
+promoted to first (highest certainty, commodity hardware) and is now
+done (see cross-references below); load_tmvs returns to the top.
+
 1. **`load_tmvs` rework** — strongest case available, now with two
    added datapoints: (a) the SSE4-over-C ratio is heavily
    workload-dependent — an 8-seed census measured
@@ -92,10 +97,14 @@ load_tmvs (usage census), itx AVX-512 pointer swaps (workload census).
   kernels from !1301 lose to AVX2 below eob~16 (missing sparse fast
   path); generate_grain_* is AVX2-only despite the checklist wording
   (verified in filmgrain_avx512.asm — only fgy/fguv apply kernels).
-- **#305 (CDEF 8-bit fully-edged, SSSE3 TODO)**: measured here at
-  --cpumask ssse3 on 1080p film content: cdef_filter_8x8 12.8% +
-  4x4 4.6% + dir 4.4% = ~21.7% of decode on AVX2-less x86 — the
-  highest-certainty remaining item for commodity hardware.
+- **#305 (CDEF 8-bit fully-edged, SSSE3 TODO)**: DONE on this branch
+  (patch "x86: add 8-bit fully-edged fast path for cdef_filter_8x8
+  SSSE3"): 8x8 kernel -6..-9%, whole-decoder -0.94% instructions at
+  --cpumask ssse3. Deliberately limited to 8x8/pure-SSSE3/pri+sec by
+  measurement (4x4/4x8 lose to buffer-build overhead; SSE4.1's path
+  is already faster). Remaining bounded extension: a sec-only (_01)
+  8x8 variant reusing the same buffer. This was prioritized over
+  load_tmvs after the upstream work-inventory review, and delivered.
 - **#403 (SVE2)**: Martin Storsjo's skepticism (128-bit SVE2 rarely
   beats NEON; single-function ports seldom useful) matches the
   AVX-512 and load_tmvs findings here; treat SVE2 as

@@ -59,9 +59,27 @@ ssse3 on _11 and _01 without regressing _10; gate end-to-end with
   edges=0xf, so correctness iteration is fast; remember --bench is
   seed-sensitive (bench with >=3 seeds; see ROADMAP load_tmvs note).
 
-## Status
+## Status: IMPLEMENTED (8x8, pure SSSE3, pri+sec)
 
-Not implemented in this branch: the full port is ~400+ lines of new
-assembly; it was scoped out of the original session after the runway
-above was prepared (see session notes in 2026-06-11-baseline.md for
-the measurement methodology to reuse).
+Landed on this branch as "x86: add 8-bit fully-edged fast path for
+cdef_filter_8x8 SSSE3", using a different construction than planned
+above: a once-per-block padded u8 buffer (stride 16) with generic
+table-offset gathers instead of per-direction specialized loads
+(~200 lines instead of ~400+). Outcomes vs the targets above:
+- 8x8_11: 438-443 -> 412-415 cycles (interleaved same-run A/B);
+  the earlier "~210-240" target assumed the AVX2-style specialized
+  gathers; the generic-gather construction trades some of that for
+  a 2x smaller implementation.
+- 4x4/4x8: measured +12-13% with this construction -> NOT enabled
+  (buffer build does not amortize over 1-2 row pairs); a future
+  attempt needs the specialized-gather design.
+- SSE4.1: its existing 16-bit path beats this construction -> the
+  fast path is pure-SSSE3 only.
+- Whole-decoder: -0.94% instructions at --cpumask ssse3 (1080p film).
+- Debug war story for the next implementer: the SSE file's direction
+  offset table starts at dir 0 with post-padding, unlike the C
+  table's dir+2 pre-pad - indexing it with the C convention produces
+  small plausible-looking errors everywhere. A bit-exact python model
+  of the per-pixel math plus an instrumented checkasm input dump is
+  the fast way to localize such bugs.
+Remaining: a sec-only (_01) 8x8 variant reusing the same buffer.
