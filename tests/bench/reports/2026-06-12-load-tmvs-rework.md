@@ -97,6 +97,42 @@ falls out of the measured workload shape:
    skip/run-heavy content (→ ~10% whole-decoder on screen streams),
    ~1.3–1.5x on dense content (per-run scalar projection irreducible).
 
+## Round 2: NEON implementation (landed, same day)
+
+Both phases landed on this branch; in-decoder interleaved A/B vs the
+2021 scalar-transcription NEON asm, M4 Pro, threads=1, medians of 7:
+
+| phase | screen 1080p | dense aomenc 720p |
+|---|---|---|
+| A: vector skip-scan only | −7.3% | −2.6% |
+| B/C: + run-find / span stores (final) | **−55%** | **+7.5%** |
+
+The B/C iteration history is the session's main lesson: the first
+draft hit −54% screen but **+36%** dense, and four rounds of removing
+data-dependent branches from the run head (+36 → +21 → +19 → +10 →
++7.5%) recovered it while the instruction count barely moved. On a
+wide out-of-order core this loop pays for unpredictable branches and
+NEON→GPR transfer latency (fmov d→x in the compare-mask path), not for
+ALU ops: short-run compares became 64-bit GPR xors (one branch per
+run for the 65% single-cell majority, measured by a run-length census:
+2.14M of 3.30M runs on the dense clip are length 1, 95k are 8+),
+escalating to 16-byte cmeq only past 4 cells.
+
+Whole-decoder effect on M4: ~−8% wall on screen-class streams
+(load_tmvs was 15% there), +0.1% on dense motion. The +7.5% dense
+kernel regression is the cost of the run abstraction on content with
+no runs; an adaptive per-call path selection (both paths are
+bit-exact, so switchable freely) is the obvious polish if upstream
+wants the regression at exactly zero. Fixture parity: 1.05–1.19x over
+C across 5 seeds, same band as the replaced asm.
+
+Port guidance for x86 (the upstream-relevant target, SSE4 2018-era):
+the same structure maps directly — pmovmskb replaces the shrn/fmov
+mask trick (cheaper there), 64-bit GPR xors work identically, pshufb
+replaces tbl for both the stride-5 ref gather and the 5-byte pattern
+phases. The dense-content branch discipline is the part to carry
+over, not the instruction selection.
+
 ## Tooling notes
 
 - The checkasm bench fixture for load_tmvs is adversarial to exactly
