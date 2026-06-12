@@ -53,6 +53,21 @@ pw_0x7FFF: times 8 dw 0x7FFF
 pw_0x8000: times 8 dw 0x8000
 full_shift_mask: ; bytewise masks for 8-bit shift emulation (psrlw on pairs)
            DUP8 0xFF, 0x7F, 0x3F, 0x1F, 0x0F, 0x07, 0x03, 0x01
+full_dirs8: ; tap offsets for the stride-8 fully-edged buffer
+           db -1*8+1, -2*8+2
+           db  0*8+1, -1*8+2
+           db  0*8+1,  0*8+2
+           db  0*8+1,  1*8+2
+           db  1*8+1,  2*8+2
+           db  1*8+0,  2*8+1
+           db  1*8+0,  2*8+0
+           db  1*8+0,  2*8-1
+           db -1*8+1, -2*8+2
+           db  0*8+1, -1*8+2
+           db  0*8+1,  0*8+2
+           db  0*8+1,  1*8+2
+           db  1*8+1,  2*8+2
+           db  1*8+0,  2*8+1
 tap_table: ; masks for 8-bit shift emulation
            DUP8 0xFF, 0xFE, 0xFC, 0xF8, 0xF0, 0xE0, 0xC0, 0x80
            ; weights
@@ -75,6 +90,118 @@ tap_table: ; masks for 8-bit shift emulation
            db  1 * 16 + 0,  2 * 16 + 1
 
 SECTION .text
+
+
+%macro CDEF_FILTER_FULL4 2 ; w(=4), h: edges==0xf && pri && sec, x86-64 ssse3+
+  %define fbuf rsp+0x20
+    mov     [rsp+0x18], dstq
+    movq            m0, [topq+strideq*0-2]
+    movq            m1, [topq+strideq*1-2]
+    movq  [fbuf+8*0], m0
+    movq  [fbuf+8*1], m1
+  %assign %%i 0
+  %rep %2/2
+    movq            m0, [dstq+strideq*0-2]
+    movq            m1, [dstq+strideq*1-2]
+    pinsrw          m0, [leftq+(%%i+0)*2], 0
+    pinsrw          m1, [leftq+(%%i+1)*2], 0
+    movq [fbuf+8*(%%i+2)], m0
+    movq [fbuf+8*(%%i+3)], m1
+   %if %%i < %2-2
+    lea           dstq, [dstq+strideq*2]
+   %endif
+   %assign %%i %%i+2
+  %endrep
+    movq            m0, [botq+strideq*0-2]
+    movq            m1, [botq+strideq*1-2]
+    movq [fbuf+8*(%2+2)], m0
+    movq [fbuf+8*(%2+3)], m1
+    mov           dstq, [rsp+0x18]
+
+    DEFINE_ARGS dst, stride, k, dir, h, pri, stk, tap, off
+    mov           prid, r5m
+    mov           dird, r7m
+    movd            m1, r5m
+    movd           m10, r6m
+    pxor            m2, m2
+    pshufb          m1, m2
+    pshufb         m10, m2
+    mov             hd, r8m              ; damping
+    mov           offd, r6m
+    bsr           offd, offd
+    mov             kd, hd
+    sub             kd, offd             ; sec_shift
+    mov     [rsp+0x10], kq
+    lea           tapq, [tap_table]
+    movddup        m12, [tapq+kq*8+full_shift_mask-tap_table]
+    mova           m15, [pw_2048]
+    bsr             kd, prid
+    sub             kd, hd
+    neg             kd                   ; pri_shift
+    mov           offd, 0
+    cmovs           kd, offd
+    mov     [rsp+0x00], kq
+    movddup        m11, [tapq+kq*8+full_shift_mask-tap_table]
+    and           prid, 1
+    add           prid, prid
+    lea           priq, [tapq+8*8+priq*8]
+    lea           dirq, [tapq+full_dirs8-tap_table+dirq*2]
+    lea           stkq, [fbuf]
+    mov             hd, %2/4
+.f4_v_loop:
+    movd            m4, [stkq+18]
+    movd            m2, [stkq+26]
+    movd           m13, [stkq+34]
+    movd           m14, [stkq+42]
+    punpckldq       m4, m2
+    punpckldq      m13, m14
+    punpcklqdq      m4, m13
+    pxor            m0, m0
+    pxor            m3, m3
+    mova            m7, m4
+    mova            m8, m4
+    mov             kd, 1
+.f4_k_loop:
+    movsx         offq, byte [dirq+ 0+kq]
+    CDEF_FULL_ACCUM4 m1, m11, [priq+kq*8], 0x00
+    movsx         offq, byte [dirq+ 4+kq]
+    CDEF_FULL_ACCUM4 m10, m12, [tapq+8*8+32+kq*8], 0x10
+    movsx         offq, byte [dirq+12+kq]
+    CDEF_FULL_ACCUM4 m10, m12, [tapq+8*8+32+kq*8], 0x10
+    dec             kd
+    jge .f4_k_loop
+    pxor            m2, m2
+    mova            m5, m2
+    pcmpgtw         m5, m0
+    paddw           m0, m5
+    pmulhrsw        m0, m15
+    mova            m5, m2
+    pcmpgtw         m5, m3
+    paddw           m3, m5
+    pmulhrsw        m3, m15
+    mova            m5, m4
+    punpcklbw       m5, m2
+    punpckhbw       m4, m2
+    paddw           m5, m0
+    paddw           m4, m3
+    packuswb        m5, m4
+    pmaxub          m5, m8
+    pminub          m5, m7
+    movd   [dstq+strideq*0], m5
+    psrldq          m5, 4
+    movd   [dstq+strideq*1], m5
+    lea           dstq, [dstq+strideq*2]
+    psrldq          m5, 4
+    movd   [dstq+strideq*0], m5
+    psrldq          m5, 4
+    movd   [dstq+strideq*1], m5
+    lea           dstq, [dstq+strideq*2]
+    add           stkq, 32
+    dec             hd
+    jg .f4_v_loop
+    RET
+    DEFINE_ARGS dst, stride, left, top, bot, pri, dst4, edge, stride3
+%endmacro
 
 %macro CDEF_FILTER_FULL 2 ; w, h: edges==0xf && pri && sec, x86-64 ssse3+
     ; Build a u8 copy of the block with 2px context on all sides
@@ -127,9 +254,9 @@ SECTION .text
     sub             hd, offd             ; sec_shift
     mov     [rsp+0x10], hq
     lea           tapq, [tap_table]
-    movddup        m11, [tapq+kq*8-64]   ; pri shift mask (bytes)
+    movddup        m11, [tapq+kq*8+full_shift_mask-tap_table]   ; pri shift mask (bytes)
     mov             kq, [rsp+0x10]
-    movddup        m12, [tapq+kq*8-64]   ; sec shift mask (bytes)
+    movddup        m12, [tapq+kq*8+full_shift_mask-tap_table]   ; sec shift mask (bytes)
     mova           m15, [pw_2048]
     and           prid, 1
     add           prid, prid
@@ -203,23 +330,7 @@ SECTION .text
     DEFINE_ARGS dst, stride, left, top, bot, pri, dst4, edge, stride3
 %endmacro
 
-%macro CDEF_FULL_ACCUM 5 ; w, strength, shift_mask, taps_mem, shift_off
-    ; p0/p1 at +-off; constrain() in u8, accumulate via pmaddubsw
-%if %1 == 8
-    movq            m5, [stkq+ 2+offq]
-    movhps          m5, [stkq+18+offq]
-    neg           offq
-    movq            m6, [stkq+ 2+offq]
-    movhps          m6, [stkq+18+offq]
-%else
-    movd            m5, [stkq+ 2+offq]
-    movd            m2, [stkq+18+offq]
-    punpckldq       m5, m2
-    neg           offq
-    movd            m6, [stkq+ 2+offq]
-    movd            m2, [stkq+18+offq]
-    punpckldq       m6, m2
-%endif
+%macro CDEF_FULL_ACCUM_BODY 5 ; w, strength, shift_mask, taps_mem, shift_off
     pmaxub          m7, m5
     pminub          m8, m5
     pmaxub          m7, m6
@@ -273,6 +384,47 @@ SECTION .text
     paddw           m3, m6
 %endif
 %endmacro
+
+%macro CDEF_FULL_ACCUM 5 ; w, strength, shift_mask, taps_mem, shift_off
+    ; p0/p1 at +-off; constrain() in u8, accumulate via pmaddubsw
+%if %1 == 8
+    movq            m5, [stkq+ 2+offq]
+    movhps          m5, [stkq+18+offq]
+    neg           offq
+    movq            m6, [stkq+ 2+offq]
+    movhps          m6, [stkq+18+offq]
+%else
+    movd            m5, [stkq+ 2+offq]
+    movd            m2, [stkq+18+offq]
+    punpckldq       m5, m2
+    neg           offq
+    movd            m6, [stkq+ 2+offq]
+    movd            m2, [stkq+18+offq]
+    punpckldq       m6, m2
+%endif
+    CDEF_FULL_ACCUM_BODY %1, %2, %3, %4, %5
+%endmacro
+
+%macro CDEF_FULL_ACCUM4 4 ; strength, shift_mask, taps_mem, shift_off
+    ; gather all four 4px rows of p0/p1 from the stride-8 buffer
+    movd            m5, [stkq+18+offq]
+    movd            m2, [stkq+26+offq]
+    movd           m13, [stkq+34+offq]
+    movd           m14, [stkq+42+offq]
+    punpckldq       m5, m2
+    punpckldq      m13, m14
+    punpcklqdq      m5, m13
+    neg           offq
+    movd            m6, [stkq+18+offq]
+    movd            m2, [stkq+26+offq]
+    movd           m13, [stkq+34+offq]
+    movd           m14, [stkq+42+offq]
+    punpckldq       m6, m2
+    punpckldq      m13, m14
+    punpcklqdq      m6, m13
+    CDEF_FULL_ACCUM_BODY 8, %1, %2, %3, %4
+%endmacro
+
 
 
 
@@ -468,7 +620,7 @@ cglobal cdef_filter_%1x%2_8bpc, 2, 7, 8, - 7 * 16 - (%2+4)*32, \
   %define base r5-tap_table
  %endif
     mov          edged, r9m
- %if ARCH_X86_64 && cpuflag(ssse3) && !cpuflag(sse4) && %1 == 8
+ %if ARCH_X86_64 && cpuflag(ssse3) && !cpuflag(sse4)
     ; 8-bit fully-edged fast path: only profitable for 8x8 on plain
     ; SSSE3 (the buffer build does not amortize for 4-wide blocks, and
     ; the SSE4.1 16-bit path is already faster than this one)
@@ -480,7 +632,11 @@ cglobal cdef_filter_%1x%2_8bpc, 2, 7, 8, - 7 * 16 - (%2+4)*32, \
     mov          dst4d, r6m
     test         dst4d, dst4d
     jz .no_full
+ %if %1 == 8
     CDEF_FILTER_FULL %1, %2
+ %else
+    CDEF_FILTER_FULL4 %1, %2
+ %endif
 .no_full:
  %endif
  %if cpuflag(sse4)
