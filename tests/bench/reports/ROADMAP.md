@@ -7,8 +7,11 @@ Consolidated from the measurement sessions recorded in
 
 1. **`load_tmvs` rework** — strongest case available, now with two
    added datapoints: (a) the SSE4-over-C ratio is heavily
-   workload-dependent — 1.37x at one checkasm seed, but **0.86-0.96x
-   (slower than C!) at seed 42** — so any rework must be benchmarked
+   workload-dependent — an 8-seed census measured
+   0.84x/0.86x/0.94x (slower than C) on three seeds and
+   1.07-1.36x on five — bimodal by workload shape (real decoding
+   uses full-tile widths, likely the favorable regime, so the asm
+   should not be dropped) — and any rework must be benchmarked
    across many seeds; (b) vectorizing just the INVALID-fill init with
    overlapping 16-byte stores was implemented and measured ~5% slower
    (store-buffer serialization from the 15-byte advance), then
