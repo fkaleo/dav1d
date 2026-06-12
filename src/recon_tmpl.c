@@ -555,7 +555,11 @@ static int decode_coefs(Dav1dTaskContext *const t,
             const ptrdiff_t stride = 4 << slh;
             const unsigned shift = slh + 2, shift2 = 0;
             const unsigned mask = (4 << slh) - 1;
-            memset(levels, 0, stride * ((4 << slw) + 2));
+            // The scan is anti-diagonal-ordered, so no position in
+            // scan[0..eob] lies beyond row eob, and the level context
+            // reads reach at most two rows further: clearing eob+3 rows
+            // suffices for sparse blocks instead of the whole area.
+            memset(levels, 0, stride * imin((4 << slw) + 2, eob + 3));
             DECODE_COEFS_CLASS(TX_CLASS_2D);
         }
         case TX_CLASS_H: {
@@ -563,7 +567,7 @@ static int decode_coefs(Dav1dTaskContext *const t,
             const ptrdiff_t stride = 16;
             const unsigned shift = slh + 2, shift2 = 0;
             const unsigned mask = (4 << slh) - 1;
-            memset(levels, 0, stride * ((4 << slh) + 2));
+            memset(levels, 0, stride * imin((4 << slh) + 2, eob + 3));
             DECODE_COEFS_CLASS(TX_CLASS_H);
         }
         case TX_CLASS_V: {
@@ -571,7 +575,7 @@ static int decode_coefs(Dav1dTaskContext *const t,
             const ptrdiff_t stride = 16;
             const unsigned shift = slw + 2, shift2 = slh + 2;
             const unsigned mask = (4 << slw) - 1;
-            memset(levels, 0, stride * ((4 << slw) + 2));
+            memset(levels, 0, stride * imin((4 << slw) + 2, eob + 3));
             DECODE_COEFS_CLASS(TX_CLASS_V);
         }
 #undef DECODE_COEFS_CLASS
