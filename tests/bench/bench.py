@@ -239,7 +239,7 @@ def cmd_counters(args):
                 cmd += ["--cpumask", str(args.cpumask)]
             r = run(cmd)
             if r.returncode != 0:
-                print(f"{clip}: valgrind failed: {r.stderr[-300:]}")
+                print(f"{clip}: valgrind failed: {r.stderr[-3000:]}")
                 continue
             ev = parse_cachegrind(tmp.name)
         per = {k: v / limit for k, v in ev.items()}
