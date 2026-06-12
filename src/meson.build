@@ -63,7 +63,6 @@ libdav1d_tmpl_sources = files(
     'cdef_tmpl.c',
     'fg_apply_tmpl.c',
     'filmgrain_tmpl.c',
-    'ipred_prepare_tmpl.c',
     'ipred_tmpl.c',
     'itx_tmpl.c',
     'lf_apply_tmpl.c',
