@@ -385,7 +385,8 @@ function load_tmvs_neon, export=1
         movi            v3.2s, #255             // 0x3FFF >> 6, for MV clamp
         movrel          x1, div_mult_tbl
         movrel          x15, load_tmvs_gather_idx
-        ld1             {v24.16b, v25.16b}, [x15]   // stride-5 ref byte gather indices
+        ld1             {v24.16b, v25.16b}, [x15], #32 // stride-5 ref byte gather indices
+        ld1             {v5.16b-v7.16b}, [x15]      // 5-byte pattern phase 0 / +16 chain / phase 4
 
 10:     // nloop
         ldrsb           w16, [x29, x10]         // ref2cur = rf->mfmv_ref2cur[n]
@@ -428,88 +429,205 @@ function load_tmvs_neon, export=1
         ldrb            w24, [x28, x22]         // ref2ref = rf->mfmv_ref2ref[n][b_ref - 1]
         cbz             w24, 6f                 // if (!ref2ref) continue
 
-        ldrh            w20, [x1, x24, lsl #1]  // div_mult[ref2ref]
-        add             x23, x23, x11           // &r[x]
-        mul             w20, w20, w16           // frac = ref2cur * div_mult[ref2ref]
+        add             x23, x23, x11           // &r[x].ref
+        ldur            w25, [x23, #-4]         // b_mv = rb->mv
 
-        ldur            s1, [x23, #-4]          // mv{y, x} = rb->mv
+        // Single-cell-run fast path: on dense content most runs are one
+        // cell, and the vector run-find setup below does not amortize
+        // there. One 40-bit compare of the two neighbouring cells settles
+        // it with a single data-dependent branch.
+        add             w20, w11, #1
+        sub             w17, w7, w11
+        cmp             w17, #3                 // need 13 readable bytes from p
+        b.lt            27f                     // row tail: treat as run of one
+        ldur            x17, [x23, #-4]         // bytes p .. p+7
+        ldur            x26, [x23, #1]          // bytes p+5 .. p+12
+        eor             x17, x17, x26
+        tst             x17, #0xffffffffff      // cell x+1 == cell x?
+        b.eq            28f                     // run of >= 2 cells: vector run-find
+27:     mov             w22, w20                // xe = x + 1
+        b               20f                     // projection
+
+28:     // Run-find. Pair bytes 5-7 ride along in the fast path's eor
+        // result: any set bit there means cells x+1 and x+2 differ.
+        cbnz            x17, 32f                // run of exactly 2 cells
+        sub             w20, w7, w11            // cells to the row scan end
+        cmp             w20, #5
+        b.lt            30f                     // row tail: scalar pair scan
+        ldur            x17, [x23, #4]          // bytes p+8 .. p+15
+        ldur            x26, [x23, #9]          // bytes p+13 .. p+20
+        eor             x17, x17, x26           // pair bytes 8-15
+        cbz             x17, 31f                // >= 4 cells: vector scan the rest
+        // mismatch in pair bytes 8-15: xe = x + idx / 5 + 1
+        rbit            x17, x17
+        clz             x17, x17
+        lsr             x17, x17, #3
+        add             w17, w17, #8            // mismatching pair byte 8..15
+        mov             w26, #52429             // 0xCCCD: exact n / 5 for n < 16384
+        mul             w26, w17, w26
+        lsr             w26, w26, #18           // / 5
+        add             w22, w11, w26
+        add             w22, w22, #1            // xe
+        b               20f
+32:     add             w22, w11, #2            // pair byte 5-7: xe = x + 2
+        b               20f
+
+31:     // run of >= 4 cells: continue the pairwise scan from byte 16
+        sub             x17, x23, #4            // p = &r[x]
+        sub             w20, w20, #1
+        add             w20, w20, w20, lsl #2   // (cells - 1) * 5 pair bytes
+        add             x22, x17, w20, sxtw     // pe = p + pair bytes
+        add             x21, x17, #16           // pa = p + 16
+        add             x23, x23, #17           // pb = pa + 5
+15:     // pairwise compare loop, 16 bytes (3.2 cells) per iteration
+        sub             x26, x22, x21
+        cmp             x26, #16
+        b.lt            17f                     // <16 pair bytes left (row end)
+        ldr             q16, [x21]
+        ldr             q17, [x23]
+        cmeq            v16.16b, v16.16b, v17.16b
+        mvn             v16.16b, v16.16b        // 0xFF at first differing byte
+        shrn            v16.8b, v16.8h, #4
+        fmov            x26, d16
+        cbz             x26, 16f                // all equal: run continues
+        rbit            x26, x26
+        clz             x26, x26
+        lsr             x26, x26, #2
+        add             x21, x21, x26           // first mismatching pair byte
+        b               18f
+16:     add             x21, x21, #16
+        add             x23, x23, #16
+        b               15b
+30:     // row tail: scalar pair scan from byte 0
+        sub             x17, x23, #4            // p = &r[x]
+        sub             w20, w20, #1
+        add             w20, w20, w20, lsl #2   // (cells - 1) * 5 pair bytes
+        mov             x21, x17                // pa = p
+        add             x22, x17, w20, sxtw     // pe = p + pair bytes
+        add             x23, x23, #1            // pb = p + 5
+17:     // scalar pair tail, at most 15 bytes, only near the row end
+        cmp             x21, x22
+        b.ge            19f                     // no mismatch: run reaches the end
+        ldrb            w26, [x21]
+        ldrb            w20, [x23]
+        cmp             w26, w20
+        b.ne            18f
+        add             x21, x21, #1
+        add             x23, x23, #1
+        b               17b
+18:     // xe = x + mismatch_byte_offset / 5 + 1
+        sub             x20, x21, x17
+        mov             w26, #52429             // 0xCCCD: exact n / 5 for n < 16384
+        mul             w20, w20, w26
+        lsr             w20, w20, #18
+        add             w22, w11, w20
+        add             w22, w22, #1            // xe
+        b               20f
+19:     mov             w22, w7                 // xe = col_end8i
+20:     // projection, once per run (the run shares ref and mv)
+        ldrh            w20, [x1, x24, lsl #1]  // div_mult[ref2ref]
+        mul             w20, w20, w16           // frac = ref2cur * div_mult[ref2ref]
+        fmov            s1, w25                 // mv{y, x} = b_mv
         fmov            s2, w20                 // frac
         sxtl            v1.4s, v1.4h
         mul             v1.2s, v1.2s, v2.s[0]   // offset{y, x} = frac * mv{y, x}
-
         ssra            v1.2s, v1.2s, #31       // offset{y, x} + (offset{y, x} >> 31)
-        ldur            w25, [x23, #-4]         // b_mv = rb->mv
         srshr           v1.2s, v1.2s, #14       // (offset{y, x} + (offset{y, x} >> 31) + 8192) >> 14
-
         abs             v2.2s, v1.2s            // abs(offset{y, x})
         eor             v1.8b, v1.8b, v0.8b     // offset{y, x} ^ ref_sign
-
         sshr            v2.2s, v2.2s, #6        // abs(offset{y, x}) >> 6
         cmlt            v1.2s, v1.2s, #0        // sign(offset{y, x} ^ ref_sign): -1 or 0
         umin            v2.2s, v2.2s, v3.2s     // iclip(abs(offset{y, x}) >> 6, 0, 0x3FFF >> 6)
-
         neg             v4.2s, v2.2s
         bsl             v1.8b, v4.8b, v2.8b     // apply_sign(iclip(abs(offset{y, x}) >> 6, 0, 0x3FFF >> 6))
         fmov            x20, d1                 // offset{y, x}
 
         add             w21, w12, w20           // pos_y = y + offset.y
         cmp             w21, w14                // pos_y >= y_proj_start
-        b.lt            1f
+        b.lt            21f                     // y-window miss: no writes
         cmp             w21, w15                // pos_y < y_proj_end
-        b.ge            1f
+        b.ge            21f
         add             x26, x11, x20, asr #32  // pos_x = x + offset.x
         and             w27, w21, #15           // pos_y & 15
         add             x21, x26, x26, lsl #2   // pos_x * sizeof(refmvs_temporal_block)
         umaddl          x27, w27, wstride5, rp_proj // &rp_proj[(pos_y & 15) * stride]
-        add             x27, x27, x21           // &rp_proj[(pos_y & 15) * stride + pos_x]
+        add             x27, x27, x21           // dst for the run head
 
-3:      // copy loop
-        and             w20, w11, #-8           // x_sb_align = x & ~7
-        sub             w21, w20, #8            // x_sb_align - 8
-        cmp             w21, col_start8
-        csel            w21, w21, col_start8, gt    // imax(x_sb_align - 8, col_start8)
-        cmp             w26, w21                // pos_x >= imax(x_sb_align - 8, col_start8)
-        b.lt            2f
-        add             w20, w20, #16           // x_sb_align + 16
-        cmp             w20, col_end8
-        csel            w20, w20, col_end8, lt  // imin(x_sb_align + 16, col_end8)
-        cmp             w26, w20                // pos_x < imin(x_sb_align + 16, col_end8)
-        b.ge            2f
-        str             w25, [x27]              // rp_proj[pos + pos_x].mv = rb->mv (b_mv)
-        strb            w24, [x27, #4]          // rp_proj[pos + pos_x].ref = ref2ref
-
-2:      // search part of copy loop
-        add             w11, w11, #1            // x++
-        cmp             w11, col_end8i          // if (++x >= col_end8i) break xloop
-        b.ge            8f
-
-        ldrb            w20, [x23, #5]!         // rb++; rb->ref
-        cmp             w20, w22                // if (rb->ref != b_ref) break
-        b.ne            7f
-
-        ldur            w21, [x23, #-4]         // rb->mv.n
-        cmp             w21, w25                // if (rb->mv.n != b_mv.n) break
-        b.ne            7f
-
-        add             w26, w26, #1            // pos_x++
-        add             x27, x27, #5            // advance &rp_proj[(pos_y & 15) * stride + pos_x]
-        b               3b                      // copy loop
-
-1:      // search loop
-        add             w11, w11, #1            // x++
-        cmp             w11, col_end8i          // if (++x >= col_end8i) break xloop
-        b.ge            8f
-
-        ldrb            w20, [x23, #5]!         // rb++; rb->ref
-        cmp             w20, w22                // if (rb->ref != b_ref) break
-        b.ne            7f
-
-        ldur            w21, [x23, #-4]         // rb->mv.n
-        cmp             w21, w25                // if (rb->mv.n == b_mv.n) continue
-        b.eq            1b                      // search loop
+        // pos_x - x is constant over the run. For dx in [-8, 8] the
+        // per-cell window test
+        //   pos_x in [imax((x & ~7) - 8, col_start8),
+        //             imin((x & ~7) + 16, col_end8))
+        // passes for every x & 7, so it reduces to one interval
+        // intersection for the whole run; outside that range (huge mv)
+        // fall back to the per-cell check.
+        sub             w20, w26, w11           // dx = pos_x - x
+        cmp             w20, #8
+        b.gt            23f
+        cmn             w20, #8
+        b.lt            23f
+        sub             w17, w2, w20            // col_start8 - dx
+        cmp             w17, w11
+        csel            w17, w17, w11, gt       // vs = imax(x, col_start8 - dx)
+        sub             w21, w3, w20            // col_end8 - dx
+        cmp             w21, w22
+        csel            w21, w21, w22, lt       // ve = imin(xe, col_end8 - dx)
+        subs            w21, w21, w17           // cells to write
+        b.le            21f
+        sub             w20, w17, w11           // vs - x
+        add             w20, w20, w20, lsl #2
+        add             x27, x27, w20, sxtw     // span dst base
+        add             w21, w21, w21, lsl #2   // span bytes (multiple of 5)
+        cmp             w21, #16
+        b.lt            22f                     // 1-3 cells: scalar stores
+        fmov            s28, w25                // pattern: mv bytes 0-3
+        mov             v28.b[4], w24           // pattern: ref byte
+        // The span is one repeating 5-byte pattern; 16 mod 5 = 1, so each
+        // 16-byte store advances the pattern phase by one (tbl chain), and
+        // the sub-16-byte tail is a 16-byte store backed up to end exactly
+        // at the span end, whose phase is constant: -16 mod 5 = 4.
+        tbl             v29.16b, {v28.16b}, v5.16b  // phase 0 pattern
+        add             x20, x27, w21, sxtw     // span end
+24:     str             q29, [x27], #16
+        tbl             v29.16b, {v29.16b}, v6.16b  // phase += 16 (mod 5)
+        sub             w21, w21, #16
+        cmp             w21, #16
+        b.ge            24b
+        cbz             w21, 21f
+        tbl             v30.16b, {v28.16b}, v7.16b  // phase 4 pattern
+        stur            q30, [x20, #-16]        // tail, ends at span end
+        b               21f
+22:     str             w25, [x27]              // .mv = b_mv
+        strb            w24, [x27, #4]          // .ref = ref2ref
+        add             x27, x27, #5
+        subs            w21, w21, #5
+        b.gt            22b
+21:     mov             w11, w22                // x = xe
 7:
         cmp             w11, col_end8i          // x < col_end8i
         b.lt            4b                      // xloop
+        b               8f
+
+23:     // dx outside [-8, 8] (rare): per-cell window check over the run
+        mov             w17, w11                // xi = x
+25:     and             w20, w17, #-8           // x_sb_align = xi & ~7
+        sub             w21, w20, #8
+        cmp             w21, col_start8
+        csel            w21, w21, col_start8, gt    // imax(x_sb_align - 8, col_start8)
+        cmp             w26, w21
+        b.lt            26f
+        add             w20, w20, #16
+        cmp             w20, col_end8
+        csel            w20, w20, col_end8, lt  // imin(x_sb_align + 16, col_end8)
+        cmp             w26, w20
+        b.ge            26f
+        str             w25, [x27]
+        strb            w24, [x27, #4]
+26:     add             w17, w17, #1            // xi++
+        cmp             w17, w22                // xi < xe
+        b.ge            21b
+        add             w26, w26, #1            // pos_x++
+        add             x27, x27, #5
+        b               25b
 
 6:      // continue case of xloop: skip-scan for the next usable block.
         // Unusable blocks (intra ref == 0, or ref2ref == 0) dominate real
@@ -590,4 +708,10 @@ endconst
 const load_tmvs_gather_idx, align=4
         .byte           4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59, 255, 255, 255, 255
         .byte           255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 5, 10, 15
+        // tbl indices expanding the 5 pattern bytes of a run to 16-byte
+        // vectors: phase 0, the +16-byte phase advance (16 mod 5 = 1),
+        // and phase 4 (-16 mod 5) for the span tail store
+        .byte           0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0
+        .byte           1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1
+        .byte           4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4
 endconst
