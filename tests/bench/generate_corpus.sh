@@ -58,7 +58,7 @@ enc uhd-2160p-8bit          "mandelbrot=s=3840x2160:r=30"              120 yuv42
 if command -v aomenc >/dev/null 2>&1; then
     if [ ! -f "$OUT/superres-720p-8bit.ivf" ]; then
         echo "encoding: superres-720p-8bit.ivf"
-        tmpy4m=$(mktemp --suffix=.y4m)
+        tmpbase=$(mktemp); tmpy4m="$tmpbase.y4m"
         "$FFMPEG" -y -hide_banner -loglevel error \
             -f lavfi -i "testsrc2=s=1280x720:r=30" -frames:v 60 \
             -pix_fmt yuv420p -f yuv4mpegpipe "$tmpy4m"
@@ -66,7 +66,7 @@ if command -v aomenc >/dev/null 2>&1; then
             --end-usage=q --cq-level=40 --superres-mode=1 \
             --superres-denominator=12 --enable-restoration=1 --threads=4 \
             "$tmpy4m" >/dev/null 2>&1
-        rm -f "$tmpy4m"
+        rm -f "$tmpbase" "$tmpy4m"
     else
         echo "exists: superres-720p-8bit.ivf"
     fi
@@ -88,14 +88,14 @@ enc_real() {
         return
     fi
     echo "encoding: $name.ivf (source: $srcfile)"
-    tmpsrc=$(mktemp --suffix=".${srcfile##*.}")
-    curl -sf -o "$tmpsrc" "$AOM_DATA/$srcfile" || { rm -f "$tmpsrc"; \
+    tmpbase=$(mktemp); tmpsrc="$tmpbase.${srcfile##*.}"
+    curl -sf -o "$tmpsrc" "$AOM_DATA/$srcfile" || { rm -f "$tmpbase" "$tmpsrc"; \
         echo "skipping $name (download failed)"; return; }
     "$FFMPEG" -y -hide_banner -loglevel error \
         -i "$tmpsrc" -frames:v "$frames" -pix_fmt "$pixfmt" \
         -c:v libsvtav1 -preset "$PRESET" -crf "$crf" \
         -svtav1-params "keyint=120" "$OUT/$name.ivf"
-    rm -f "$tmpsrc"
+    rm -f "$tmpbase" "$tmpsrc"
 }
 
 # name                       source                        frames fmt         crf

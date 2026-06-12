@@ -32,6 +32,18 @@ python3 tests/bench/bench.py check       # expect 22/22 conformance both
 build/tests/checkasm                     # expect all tests passed
 ```
 
+macOS (Apple Silicon) variant, verified on an M4 Pro:
+- `brew install meson ninja` replaces step 1 (nasm is x86-only; ffmpeg
+  with libsvtav1 and aom-tools come from brew as `ffmpeg` and `aom`).
+- code.videolan.org is reachable, so meson fetches the checkasm
+  subproject itself from `subprojects/checkasm.wrap` — skip step 2.
+- valgrind does not exist on macOS arm64. The counters/profile
+  subcommands are unavailable; the M4 is quiet bare metal, so
+  interleaved A/B wall-clock is authoritative here (unlike shared
+  containers), and `powermetrics` gives package energy.
+- generate refs from a trusted master build via the global flag:
+  `bench.py --dav1d <master-build>/tools/dav1d make-refs`.
+
 Environment facts that cost time to rediscover:
 - perf and RAPL are unavailable; valgrind (cachegrind/callgrind) is the
   deterministic counter source. valgrind masks AVX-512: counters
