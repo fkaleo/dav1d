@@ -158,13 +158,29 @@ void bytefn(dav1d_cdef_brow)(Dav1dTaskContext *const tc,
         if ((!have_tt || sbrow_start || by + 2 < by_end) &&
             edges & CDEF_HAVE_BOTTOM)
         {
-            // backup pre-filter data for next iteration
-            pixel *const cdef_top_bak[3] = {
-                f->lf.cdef_line[!tf][0] + have_tt * sby * 4 * y_stride,
-                f->lf.cdef_line[!tf][1] + have_tt * sby * 8 * uv_stride,
-                f->lf.cdef_line[!tf][2] + have_tt * sby * 8 * uv_stride
-            };
-            backup2lines(cdef_top_bak, ptrs, f->cur.stride, layout);
+            // The backed-up rows are only read as the top context of the
+            // next row-pair's filters: when that row-pair lies within this
+            // call and provably filters no block, the copy can be skipped.
+            // Backups feeding the next sbrow task are always kept.
+            int needed = 1;
+            if (by + 2 < by_end) {
+                const int by_idx2 = ((by + 2) & 30) >> 1;
+                needed = 0;
+                for (int sb128x = 0; sb128x < f->sb128w && !needed; sb128x++) {
+                    const uint16_t (*const noskip_row)[2] =
+                        &lflvl[sb128x].noskip_mask[by_idx2];
+                    needed = noskip_row[0][0] | noskip_row[0][1];
+                }
+            }
+            if (needed) {
+                // backup pre-filter data for next iteration
+                pixel *const cdef_top_bak[3] = {
+                    f->lf.cdef_line[!tf][0] + have_tt * sby * 4 * y_stride,
+                    f->lf.cdef_line[!tf][1] + have_tt * sby * 8 * uv_stride,
+                    f->lf.cdef_line[!tf][2] + have_tt * sby * 8 * uv_stride
+                };
+                backup2lines(cdef_top_bak, ptrs, f->cur.stride, layout);
+            }
         }
 
         ALIGN_STK_16(pixel, lr_bak, 2 /* idx */, [3 /* plane */][8 /* y */][2 /* x */]);
