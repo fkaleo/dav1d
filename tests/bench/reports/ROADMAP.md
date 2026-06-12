@@ -115,40 +115,15 @@ load_tmvs (usage census), itx AVX-512 pointer swaps (workload census).
 
 ## Environment requirements for the remaining avenues
 
-1. **Any session/machine with repo write access** (a fresh Claude Code
-   web session now qualifies) — lands the branch, activates the CI
-   workflow, enables upstream MRs and posting findings to
-   #305/#316/#395, and reaches code.videolan.org / real Chimera
-   content blocked here. Unlocks everything below indirectly. Cost: 0.
-2. **GitHub Actions arm64 runners** (free; workflow already in
-   .github/) — first non-x86 gate + counters for all 13 patches and
-   the PGO/LTO recipe (the I-cache findings predict bigger effects on
-   ARM). Paid large runners (up to 64 cores) additionally reproduce
-   the #395 mutex-contention regime upstream reports beyond ~16 cores.
-3. **Many-core machine (>=16-64 logical cores)** — cloud spot instance
-   suffices — the #395 scheduler redesign (Ronald's design in the
-   issue) plus our low-core overhead finding: the single biggest
-   unimplemented prize. Validation needs scaling curves, impossible
-   on 4 shared cores.
-4. **Quiet bare-metal x86-64 with root** (any desktop) — wall-clock
-   authority for the 1-3.5% instruction wins, RAPL package energy
-   (joules per video-hour: the project's end goal), perf-vs-valgrind
-   cross-check, and the AVX-512 census tail on Zen 4 / Sapphire
-   Rapids before acting on it.
-5. **Little-core ARM board** (Pi 3/4, A53/A55 class) — where the
-   I-cache discipline and PGO/LTO matter most; validates the
-   never-inline-into-decode_b rule against tiny caches. **Apple
-   Silicon M1/M2** adds powermetrics energy and a high-IPC ARM
-   datapoint. SVE2 (#403): Graviton4/Axion-class for 128-bit SVE2;
-   the wider-vector hardware Martin Storsjo awaits barely exists yet.
-6. **RISC-V RVV 1.0 board** (Spacemit K1 class, e.g. Banana Pi BPI-F3)
-   — the thinnest-asm-coverage target; the pure-C census here is the
-   kernel priority list. QEMU validates RVV correctness but not
-   performance.
-7. **AVX2-less x86** (Atom/Celeron-class) — the real population for
-   the new SSSE3 CDEF patches; --cpumask ssse3 on Ice Lake
-   approximates the instruction mix but not in-order microarchitecture
-   behaviour.
+| # | Environment | Cost | Unlocks | Avenues served |
+|---|---|---|---|---|
+| 1 | Any session/machine with repo write access (a fresh Claude Code web session now qualifies) | 0 | Land the branch, activate CI, upstream MRs, post findings to #305/#316/#395, reach code.videolan.org + real Chimera content | Everything below, indirectly |
+| 2 | GitHub Actions arm64 runners (workflow already in .github/) | 0 | First non-x86 gate + counters for all 13 patches; PGO/LTO on ARM | AArch64 validation; I-cache hypothesis |
+| 3 | Many-core machine, 16-64 logical cores (cloud spot) | ~$2-5/h | Scaling curves; implement+validate Ronald's #395 design | Scheduler redesign - biggest unimplemented prize |
+| 4 | Quiet bare-metal x86-64 with root | a desktop | Wall-clock authority, RAPL joules/video-hour, perf cross-check, AVX-512 tail on Zen 4/SPR | Energy ground truth; #316 census confirmation |
+| 5 | Little-core ARM board (Pi 3/4, A53/A55) + Apple Silicon M1/M2 | ~$50 / borrowed | Tiny-cache regime for inline/PGO findings; powermetrics energy; Graviton4-class for 128-bit SVE2 | ARM energy story; #403 (measure-first) |
+| 6 | RISC-V RVV 1.0 board (Spacemit K1, e.g. BPI-F3) | ~$120 | Real RVV perf (QEMU = correctness only) | RVV kernel gap list from the pure-C census; patch 9 ships value here |
+| 7 | AVX2-less x86 (Atom/Celeron-class) | free/old laptop | In-order microarchitecture truth for the SSSE3 CDEF patches | Confirm patches 12-13 on the actual target population |
 
 The harness (tests/bench/) and BOOTSTRAP.md are portable to all of
 these; only the apt package names and the valgrind availability vary.
