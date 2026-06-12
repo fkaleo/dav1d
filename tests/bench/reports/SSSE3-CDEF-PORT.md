@@ -70,9 +70,11 @@ table-offset gathers instead of per-direction specialized loads
   the earlier "~210-240" target assumed the AVX2-style specialized
   gathers; the generic-gather construction trades some of that for
   a 2x smaller implementation.
-- 4x4/4x8: measured +12-13% with this construction -> NOT enabled
-  (buffer build does not amortize over 1-2 row pairs); a future
-  attempt needs the specialized-gather design.
+- 4x4/4x8: the stride-16 construction measured +12-13% -> rejected;
+  a REDESIGNED stride-8 whole-group variant subsequently landed:
+  4x4_11 -7%, 4x8_11 -4..-11% kernel cycles (interleaved A/B), at
+  +0.11% whole-decoder instructions (more, cheaper instructions -
+  cycle-level win confirmed across runs).
 - SSE4.1: its existing 16-bit path beats this construction -> the
   fast path is pure-SSSE3 only.
 - Whole-decoder: -0.94% instructions at --cpumask ssse3 (1080p film).
