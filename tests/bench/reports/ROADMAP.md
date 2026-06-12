@@ -5,12 +5,17 @@ Consolidated from the measurement sessions recorded in
 
 ## Assembly work (tooled: checkasm runs in this environment, see README)
 
-1. **AVX2 `load_tmvs`** — strongest case available: SSE4 asm is only
-   1.37x over C at ~54.5k cycles/call, and the function is up to 16.7%
-   of cheap-content decode. SSE4 reference exists; a lazy-projection
-   alternative is ruled out by the usage census (dense content reads
-   65-170% of projected cells). The single best next patch for anyone
-   who can write x86 asm.
+1. **`load_tmvs` rework** — strongest case available, now with two
+   added datapoints: (a) the SSE4-over-C ratio is heavily
+   workload-dependent — 1.37x at one checkasm seed, but **0.86-0.96x
+   (slower than C!) at seed 42** — so any rework must be benchmarked
+   across many seeds; (b) vectorizing just the INVALID-fill init with
+   overlapping 16-byte stores was implemented and measured ~5% slower
+   (store-buffer serialization from the 15-byte advance), then
+   reverted. The function is up to 16.7% of cheap-content decode and
+   a lazy-projection alternative is ruled out by the usage census.
+   This needs an algorithm-level rethink of the projection loop, not
+   peephole SIMD.
 2. **Sparse-eob fast path for AVX-512 identity itx kernels** — gap
    proven (flat ~127 cycles at all eob vs AVX2's 34→152 scaling), but
    low priority: large IDTX blocks are nearly absent in real streams.
