@@ -12,7 +12,16 @@ jobs:
   gate:
     strategy:
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - os: ubuntu-24.04
+            vg_cpumask: ""
+          # apt valgrind (3.22) cannot decode the SVE/I8MM instructions the
+          # Neoverse runners select, so 6 of 7 1080p clips die under
+          # cachegrind; mask the counter runs to the dotprod tier
+          # (3 = dotprod|neon), mirroring how valgrind masks AVX-512 to
+          # AVX2 on x86. Gate steps still run the full instruction set.
+          - os: ubuntu-24.04-arm
+            vg_cpumask: "--cpumask 3"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -42,7 +51,7 @@ jobs:
       - name: counters (energy proxies, subset)
         run: |
           python3 tests/bench/bench.py counters --limit 20 --clip 1080p \
-            --out counters-${{ matrix.os }}.json
+            ${{ matrix.vg_cpumask }} --out counters-${{ matrix.os }}.json
       # Build upstream master with the same config and re-run the gate and
       # counters against the same corpus on the same runner: corpus verify
       # cross-checks the two builds bit-exact, and the counter diff is the
@@ -57,7 +66,7 @@ jobs:
           ninja -C build-master tools/dav1d
           python3 tests/bench/bench.py --dav1d build-master/tools/dav1d check
           python3 tests/bench/bench.py --dav1d build-master/tools/dav1d \
-            counters --limit 20 --clip 1080p \
+            counters --limit 20 --clip 1080p ${{ matrix.vg_cpumask }} \
             --out counters-master-${{ matrix.os }}.json
       - name: compare (master -> branch)
         run: |
