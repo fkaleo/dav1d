@@ -28,6 +28,7 @@
 #include "config.h"
 
 #include <limits.h>
+#include <string.h>
 
 #include "common/intops.h"
 
@@ -43,6 +44,25 @@ static inline void ctx_refill(MsacContext *const s) {
     const uint8_t *buf_end = s->buf_end;
     int c = EC_WIN_SIZE - s->cnt - 24;
     ec_win dif = s->dif;
+    if (sizeof(ec_win) == 8 && buf_end - buf_pos >= 8) {
+        // Bulk refill: all pending bytes of a big-endian load land at a
+        // single shift. Bits of the first unconsumed byte that fall below
+        // bit 0 of the window are ORed in early; the next refill ORs the
+        // same byte again, which is idempotent, so the stream state stays
+        // identical to the byte-loop version.
+        uint64_t b;
+        memcpy(&b, buf_pos, 8);
+#if defined(__GNUC__) || defined(__clang__)
+        b = __builtin_bswap64(b);
+#else
+        b = ((b & 0x00000000ffffffffULL) << 32) | ((b >> 32) & 0x00000000ffffffffULL);
+        b = ((b & 0x0000ffff0000ffffULL) << 16) | ((b >> 16) & 0x0000ffff0000ffffULL);
+        b = ((b & 0x00ff00ff00ff00ffULL) <<  8) | ((b >>  8) & 0x00ff00ff00ff00ffULL);
+#endif
+        dif |= (ec_win)(~b >> (56 - c));
+        buf_pos += (c >> 3) + 1;
+        c = (c & 7) - 8;
+    } else
     do {
         if (buf_pos >= buf_end) {
             // set remaining bits to 1;
