@@ -719,16 +719,24 @@ static void load_tmvs_c(const refmvs_frame *const rf, int tile_row_idx,
         const int ref = rf->mfmv_ref[n];
         const int ref_sign = ref - 4;
         const refmvs_temporal_block *r = &rf->rp_ref[ref][row_start8 * stride];
+        // merged skip test: blocks are unusable for this mfmv ref if intra
+        // (ref == 0) or if their reference has no projectable distance
+        // (ref2ref == 0); folding both into one table-driven scan loop keeps
+        // the dominant skip runs (long intra/static spans) in a 3-op loop
+        uint8_t usable[8];
+        usable[0] = 0;
+        for (int i = 1; i < 8; i++)
+            usable[i] = rf->mfmv_ref2ref[n][i - 1] != 0;
         for (int y = row_start8; y < row_end8; y++) {
             const int y_sb_align = y & ~7;
             const int y_proj_start = imax(y_sb_align, row_start8);
             const int y_proj_end = imin(y_sb_align + 8, row_end8);
             for (int x = col_start8i; x < col_end8i; x++) {
+                while (x < col_end8i && !usable[r[x].ref]) x++;
+                if (x >= col_end8i) break;
                 const refmvs_temporal_block *rb = &r[x];
                 const int b_ref = rb->ref;
-                if (!b_ref) continue;
                 const int ref2ref = rf->mfmv_ref2ref[n][b_ref - 1];
-                if (!ref2ref) continue;
                 const mv b_mv = rb->mv;
                 const mv offset = mv_projection(b_mv, ref2cur, ref2ref);
                 int pos_x = x + apply_sign(abs(offset.x) >> 6,
