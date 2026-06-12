@@ -1,0 +1,49 @@
+# Correctness gate + deterministic counters for the tests/bench harness.
+# Runs on x86-64 and arm64 runners; arm64 gives the first non-x86
+# datapoints for the optimisation work (see tests/bench/reports/).
+# NOTE: authored in a sandbox that cannot execute Actions; expect to
+# iterate on first run.
+name: bench-harness
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "claude/**" ]
+jobs:
+  gate:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build nasm ffmpeg aom-tools valgrind
+      - name: checkasm subproject (mirror)
+        run: |
+          curl -L https://codeload.github.com/haasn/checkasm/tar.gz/refs/tags/v1.2.0 \
+            | tar xz -C subprojects && mv subprojects/checkasm-1.2.0 subprojects/checkasm
+      - name: build
+        run: |
+          meson setup build --buildtype release -Ddebug=true -Dtrim_dsp=false \
+                            -Dtestdata_tests=false
+          ninja -C build
+          ninja -C build tests/checkasm
+      - name: checkasm
+        run: build/tests/checkasm
+      - name: corpus + gate
+        run: |
+          tests/bench/fetch_conformance.sh
+          tests/bench/generate_corpus.sh
+          python3 tests/bench/bench.py make-refs
+          python3 tests/bench/bench.py check
+      - name: counters (energy proxies, subset)
+        run: |
+          python3 tests/bench/bench.py counters --limit 20 --clip 1080p \
+            --out counters-${{ matrix.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: counters-${{ matrix.os }}
+          path: counters-*.json
