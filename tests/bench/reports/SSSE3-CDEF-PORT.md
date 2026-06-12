@@ -82,4 +82,11 @@ table-offset gathers instead of per-direction specialized loads
   small plausible-looking errors everywhere. A bit-exact python model
   of the per-pixel math plus an instrumented checkasm input dump is
   the fast way to localize such bugs.
-Remaining: a sec-only (_01) 8x8 variant reusing the same buffer.
+The sec-only (_01) 8x8 extension was subsequently implemented and
+REJECTED by measurement: with only two tap-pairs per k to amortize
+the buffer build, the new construction measured neutral-to-+4% vs the
+existing 16-bit path (interleaved A/B, old median 237.7 vs new 239.9
+cycles), the same failure shape as 4x4/4x8. The pri+sec (_11) case is
+the only configuration where this construction pays, and that is what
+ships. Checkasm passed on 4 seeds before the rejection - the
+construction is correct, just not faster there.
