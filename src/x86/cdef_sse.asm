@@ -51,6 +51,8 @@ pw_256:    times 8 dw 256
 pw_2048:   times 8 dw 2048
 pw_0x7FFF: times 8 dw 0x7FFF
 pw_0x8000: times 8 dw 0x8000
+full_shift_mask: ; bytewise masks for 8-bit shift emulation (psrlw on pairs)
+           DUP8 0xFF, 0x7F, 0x3F, 0x1F, 0x0F, 0x07, 0x03, 0x01
 tap_table: ; masks for 8-bit shift emulation
            DUP8 0xFF, 0xFE, 0xFC, 0xF8, 0xF0, 0xE0, 0xC0, 0x80
            ; weights
@@ -73,6 +75,206 @@ tap_table: ; masks for 8-bit shift emulation
            db  1 * 16 + 0,  2 * 16 + 1
 
 SECTION .text
+
+%macro CDEF_FILTER_FULL 2 ; w, h: edges==0xf && pri && sec, x86-64 ssse3+
+    ; Build a u8 copy of the block with 2px context on all sides
+    ; (stride 16), so every direction tap becomes a generic unaligned
+    ; load at tap_table's dy*16+dx byte offset. left[] replaces the
+    ; already-filtered columns at x-2/x-1; top/bot rows come from the
+    ; pre-filter line buffers.
+  %define fbuf rsp+0x20
+    mov     [rsp+0x18], dstq
+    movu            m0, [topq+strideq*0-2]
+    movu            m1, [topq+strideq*1-2]
+    mova [fbuf+16*0], m0
+    mova [fbuf+16*1], m1
+  %assign %%i 0
+  %rep %2/2
+    movu            m0, [dstq+strideq*0-2]
+    movu            m1, [dstq+strideq*1-2]
+    pinsrw          m0, [leftq+(%%i+0)*2], 0
+    pinsrw          m1, [leftq+(%%i+1)*2], 0
+    mova [fbuf+16*(%%i+2)], m0
+    mova [fbuf+16*(%%i+3)], m1
+   %if %%i < %2-2
+    lea           dstq, [dstq+strideq*2]
+   %endif
+   %assign %%i %%i+2
+  %endrep
+    movu            m0, [botq+strideq*0-2]
+    movu            m1, [botq+strideq*1-2]
+    mova [fbuf+16*(%2+2)], m0
+    mova [fbuf+16*(%2+3)], m1
+    mov           dstq, [rsp+0x18]
+
+    DEFINE_ARGS dst, stride, k, dir, h, pri, stk, tap, off
+    mov           prid, r5m
+    mov           dird, r7m
+    movd            m1, r5m
+    movd           m10, r6m
+    pxor            m2, m2
+    pshufb          m1, m2               ; pri strength (bytes)
+    pshufb         m10, m2               ; sec strength (bytes)
+    mov             hd, r8m              ; damping
+    bsr             kd, prid
+    sub             kd, hd
+    neg             kd                   ; pri_shift
+    mov           offd, 0
+    cmovs           kd, offd
+    mov     [rsp+0x00], kq
+    mov           offd, r6m
+    bsr           offd, offd
+    sub             hd, offd             ; sec_shift
+    mov     [rsp+0x10], hq
+    lea           tapq, [tap_table]
+    movddup        m11, [tapq+kq*8-64]   ; pri shift mask (bytes)
+    mov             kq, [rsp+0x10]
+    movddup        m12, [tapq+kq*8-64]   ; sec shift mask (bytes)
+    mova           m15, [pw_2048]
+    and           prid, 1
+    add           prid, prid
+    lea           priq, [tapq+8*8+priq*8]  ; pri taps {k0,k1}
+    lea           dirq, [tapq+12*8+16+dirq*2]
+    lea           stkq, [fbuf+32]
+    mov             hd, %2/2
+.full_v_loop:
+%if %1 == 8
+    movq            m4, [stkq+ 2]
+    movhps          m4, [stkq+18]
+%else
+    movd            m4, [stkq+ 2]
+    movd            m2, [stkq+18]
+    punpckldq       m4, m2
+%endif
+    pxor            m0, m0               ; sum lo
+%if %1 == 8
+    pxor            m3, m3               ; sum hi
+%endif
+    mova            m7, m4               ; max
+    mova            m8, m4               ; min
+    mov             kd, 1
+.full_k_loop:
+    movsx         offq, byte [dirq+ 0+kq] ; pri tap:  dir
+    CDEF_FULL_ACCUM %1, m1, m11, [priq+kq*8], 0x00
+    movsx         offq, byte [dirq+ 4+kq] ; sec tap0: dir+2
+    CDEF_FULL_ACCUM %1, m10, m12, [tapq+8*8+32+kq*8], 0x10
+    movsx         offq, byte [dirq+12+kq] ; sec tap1: dir-2 (+6, post-padded)
+    CDEF_FULL_ACCUM %1, m10, m12, [tapq+8*8+32+kq*8], 0x10
+    dec             kd
+    jge .full_k_loop
+    ; adjust: px += (sum + 8 + (sum < 0)) >> 4, clipped to [min, max]
+    pxor            m2, m2
+    mova            m5, m2
+    pcmpgtw         m5, m0
+    paddw           m0, m5
+    pmulhrsw        m0, m15
+%if %1 == 8
+    mova            m5, m2
+    pcmpgtw         m5, m3
+    paddw           m3, m5
+    pmulhrsw        m3, m15
+    mova            m5, m4
+    punpcklbw       m5, m2
+    punpckhbw       m4, m2
+    paddw           m5, m0
+    paddw           m4, m3
+    packuswb        m5, m4
+%else
+    punpcklbw       m4, m2
+    paddw           m4, m0
+    packuswb        m4, m4
+    mova            m5, m4
+%endif
+    pmaxub          m5, m8
+    pminub          m5, m7
+%if %1 == 8
+    movq   [dstq+strideq*0], m5
+    movhps [dstq+strideq*1], m5
+%else
+    movd   [dstq+strideq*0], m5
+    psrldq          m5, 4
+    movd   [dstq+strideq*1], m5
+%endif
+    lea           dstq, [dstq+strideq*2]
+    add           stkq, 32
+    dec             hd
+    jg .full_v_loop
+    RET
+    DEFINE_ARGS dst, stride, left, top, bot, pri, dst4, edge, stride3
+%endmacro
+
+%macro CDEF_FULL_ACCUM 5 ; w, strength, shift_mask, taps_mem, shift_off
+    ; p0/p1 at +-off; constrain() in u8, accumulate via pmaddubsw
+%if %1 == 8
+    movq            m5, [stkq+ 2+offq]
+    movhps          m5, [stkq+18+offq]
+    neg           offq
+    movq            m6, [stkq+ 2+offq]
+    movhps          m6, [stkq+18+offq]
+%else
+    movd            m5, [stkq+ 2+offq]
+    movd            m2, [stkq+18+offq]
+    punpckldq       m5, m2
+    neg           offq
+    movd            m6, [stkq+ 2+offq]
+    movd            m2, [stkq+18+offq]
+    punpckldq       m6, m2
+%endif
+    pmaxub          m7, m5
+    pminub          m8, m5
+    pmaxub          m7, m6
+    pminub          m8, m6
+    mova            m9, m5
+    psubusb         m9, m4               ; p0 - px
+    mova           m13, m4
+    psubusb        m13, m5               ; px - p0
+    mova           m14, m6
+    psubusb        m14, m4               ; p1 - px
+    mova            m2, m4
+    psubusb         m2, m6               ; px - p1
+    por             m9, m13              ; |d0|
+    por            m14, m2               ; |d1|
+    pcmpeqb        m13, m9               ; d0 <= 0
+    pcmpeqb         m2, m14              ; d1 <= 0
+    ; c = min(|d|, sat(strength - (|d| >> shift)))
+    mova            m5, m9
+    psrlw           m5, [rsp+%5]
+    pand            m5, %3
+    mova            m6, %2
+    psubusb         m6, m5
+    pminub          m6, m9               ; c0
+    mova            m5, m14
+    psrlw           m5, [rsp+%5]
+    pand            m5, %3
+    mova            m9, %2
+    psubusb         m9, m5
+    pminub          m9, m14              ; c1
+    ; interleave c0|c1 and apply signed taps
+    mova            m5, m6
+    punpcklbw       m5, m9               ; c lo
+%if %1 == 8
+    punpckhbw       m6, m9               ; c hi
+%endif
+    mova           m14, m13
+    punpcklbw      m14, m2               ; sign lo
+%if %1 == 8
+    punpckhbw      m13, m2               ; sign hi
+%endif
+    movddup         m2, %4               ; taps
+    por            m14, m2
+    mova            m9, m2
+    psignb          m9, m14              ; +-tap lo
+    pmaddubsw       m5, m9
+    paddw           m0, m5
+%if %1 == 8
+    por            m13, m2
+    psignb          m2, m13              ; +-tap hi
+    pmaddubsw       m6, m2
+    paddw           m3, m6
+%endif
+%endmacro
+
+
 
 %macro movif32 2
  %if ARCH_X86_32
@@ -266,6 +468,21 @@ cglobal cdef_filter_%1x%2_8bpc, 2, 7, 8, - 7 * 16 - (%2+4)*32, \
   %define base r5-tap_table
  %endif
     mov          edged, r9m
+ %if ARCH_X86_64 && cpuflag(ssse3) && !cpuflag(sse4) && %1 == 8
+    ; 8-bit fully-edged fast path: only profitable for 8x8 on plain
+    ; SSSE3 (the buffer build does not amortize for 4-wide blocks, and
+    ; the SSE4.1 16-bit path is already faster than this one)
+    cmp          edged, 0x0f
+    jne .no_full
+    mov          dst4d, r5m
+    test         dst4d, dst4d
+    jz .no_full
+    mov          dst4d, r6m
+    test         dst4d, dst4d
+    jz .no_full
+    CDEF_FILTER_FULL %1, %2
+.no_full:
+ %endif
  %if cpuflag(sse4)
    %define OUT_OF_BOUNDS_MEM [base+pw_0x8000]
  %else
