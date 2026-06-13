@@ -41,10 +41,15 @@ done (see cross-references below); load_tmvs returns to the top.
    coverage gap list at 18k–97k cycles/kernel; bounded value (runs
    per frame, not per pixel) but the largest uncovered family.
 4. **Upstream task-list SIMD items, quantified here**:
-   `order_palette()` to DSP (~2.6% on screen content); and the two
-   high-ceiling restructurings — dequant moved into itx, and
-   diagonal-oriented coefficient contexting — which are the only
-   known roads into the 40–64% entropy-decode share.
+   ~~`order_palette()` to DSP (~2.6% on screen content)~~ — **rejected
+   on this platform 2026-06-13 (see 2026-06-13-order-palette.md)**: the
+   "2.6%" is the inclusive palette cost (msac-dominated); `order_palette`
+   alone is ~0.65% even on a forced-palette aomenc clip and 0% on all
+   SVT content, so a complex permutation kernel is not worth it here —
+   revisit only with real screen-share profiling. The two high-ceiling
+   restructurings remain: dequant moved into itx, and diagonal-oriented
+   coefficient contexting — the only known roads into the 40–64%
+   entropy-decode share.
 
 ## Structural / threading (needs bare-metal multithread measurement)
 
