@@ -349,7 +349,6 @@ function load_tmvs_neon, export=1
         mov             w17, #(INVALID_MV >> 8)             // last 32b of 4 patterns
         sub             w12, row_end8, row_start8           // yfill loop count
         ror             x16, x15, #48                       // second 64b of 4 patterns
-        ldr             w19, [rf, #RMVSF_N_MFMVS]
 
 5:      // yfill loop
         and             w13, w11, #-4           // xfill 4x count by patterns
@@ -378,7 +377,11 @@ function load_tmvs_neon, export=1
 2:
         cbnz            w12, 5b                 // yfill loop
 
+        ldr             w19, [rf, #RMVSF_N_MFMVS]
         cbz             w19, 11f                // if (!rf->n_mfmvs) skip nloop
+        // w19 is reloaded as n_mfmvs at the nloop tail; between the
+        // per-n pre-sample below and that tail it carries the adaptive
+        // `dense` flag instead.
 
         add             x29, rf, #RMVSF_MFMV_REF2CUR
         mov             w10, #0                 // n = 0
@@ -412,6 +415,66 @@ function load_tmvs_neon, export=1
         cmtst           v16.8b, v16.8b, v16.8b  // 0xFF where ref2ref != 0
         ext             v26.16b, v17.16b, v16.16b, #15 // usable[ref]: [0] = 0, [k] = ref2ref[k - 1] != 0
 
+        // Adaptive path pre-sample (per mfmv ref). Estimate the usable-run
+        // extension probability over up to 64 cells of the first row:
+        // among sampled usable cells, the fraction whose right neighbour
+        // is byte-identical. Long usable runs (screen/film) amortise the
+        // run-find machinery; short runs (dense motion) do not, where the
+        // per-cell path is both simpler and faster. Conservative
+        // threshold (ext < ~0.62): taking the per-cell path on long-run
+        // content is far costlier than the reverse (it loses the whole
+        // run win), so only clearly-dense content switches.
+        // Run density is a property of the frame's temporal MV field, so
+        // sample once (n == 0) and reuse the verdict for the other refs.
+        cbnz            w10, 42f                // n != 0: keep dense from n == 0
+        mov             w19, #0                 // dense = 0 (default: run-find)
+        mov             w20, #0                 // usable bitmask
+        mov             w21, #1                 // k = 1
+40:     ldrb            w22, [x28, w21, uxtw]   // ref2ref[k - 1]
+        cmp             w22, #0
+        cset            w22, ne
+        lsl             w22, w22, w21
+        orr             w20, w20, w22           // bit k set iff cell ref k usable
+        add             w21, w21, #1
+        cmp             w21, #8
+        b.lt            40b
+
+        sub             w21, w7, w6             // col_end8i - col_start8i
+        subs            w21, w21, #2            // pairs, less 8-byte read-ahead slack
+        b.le            42f                     // too narrow: keep dense = 0
+        cmp             w21, #32
+        mov             w22, #32
+        csel            w21, w21, w22, lt       // W = min(pairs, 32)
+        add             x22, x6, x6, lsl #2     // col_start8i * 5
+        add             x22, x13, x22
+        sub             x22, x22, #4            // &r[col_start8i]
+        mov             w23, #0                 // use_n
+        mov             w24, #0                 // use_ext
+        ldur            x26, [x22]              // cell[x]
+41:     ubfx            x27, x26, #32, #8       // ref of cell[x]
+        lsr             w17, w20, w27           // usable bitmask >> ref
+        tbz             w17, #0, 43f            // not usable: skip
+        add             w23, w23, #1            // use_n++
+        ldur            x17, [x22, #5]          // cell[x + 1]
+        eor             x17, x17, x26
+        tst             x17, #0xffffffffff      // neighbour identical (40-bit)?
+        cinc            w24, w24, eq            // use_ext += (eq)
+43:     add             x22, x22, #5
+        ldur            x26, [x22]              // next cell[x] (== old cell[x + 1])
+        subs            w21, w21, #1
+        b.ne            41b
+        cbz             w23, 42f                // no usable cells sampled: dense = 0
+        // dense iff use_ext/use_n < 0.5. The per-row sample is a noisy
+        // per-call predictor (the regimes separate cleanly on average but
+        // overlap per call), and a false `dense` on long-run content is
+        // far costlier than a missed one, so the threshold is deliberately
+        // conservative: it catches ~half of genuinely dense calls while
+        // misfiring on only a few percent of film/screen calls.
+        lsl             w24, w24, #1            // use_ext * 2
+        cmp             w24, w23
+        cset            w19, lt                 // dense iff use_ext * 2 < use_n
+42:
+
 5:      // yloop
         and             w14, w12, #-8           // y_sb_align = y & ~7
         mov             w11, col_start8i        // x = col_start8i
@@ -437,6 +500,7 @@ function load_tmvs_neon, export=1
         // there. One 40-bit compare of the two neighbouring cells settles
         // it with a single data-dependent branch.
         add             w20, w11, #1
+        cbnz            w19, 27f                // dense (pre-sampled): per-cell
         sub             w17, w7, w11
         cmp             w17, #3                 // need 13 readable bytes from p
         b.lt            27f                     // row tail: treat as run of one
@@ -670,7 +734,8 @@ function load_tmvs_neon, export=1
         b.lt            5b                      // yloop
 9:
         add             w10, w10, #1
-        cmp             w10, w19                // n < rf->n_mfmvs
+        ldr             w20, [rf, #RMVSF_N_MFMVS]   // reload (w19 now holds `dense`)
+        cmp             w10, w20                // n < rf->n_mfmvs
         b.lt            10b                     // nloop
 11:
         ldp             x29, x30, [sp, #80]
