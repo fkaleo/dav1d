@@ -177,6 +177,62 @@ M4 Pro:
   ever matters, bounding the run-find read-ahead to the run length
   already known from the GPR fast path would remove it.
 
+## Round 3: adaptive path selection (landed, 2026-06-13)
+
+The run-level rework regresses dense motion (+7.5% kernel on the aomenc
+stressor) while winning hugely on long-run content. A degenerate
+experiment — skip-scan + per-cell projection with the run-find disabled
+— localized why: it measured **38.7ms on the dense stressor (vs 48.3
+run-level, 44.8 old)** but **253ms on screen (vs 55 run-level)**. The
+two regimes want opposite code, so the kernel now picks per call.
+
+Selection signal: over up to 32 cells of the first row, the fraction of
+*usable* cells whose right neighbour is byte-identical (the usable-run
+extension probability). Measured per clip (C-path replica of the asm
+sample):
+
+| clip | usable_ext (avg) | wants |
+| --- | --- | --- |
+| dense aomenc motion | 0.42 | per-cell |
+| Summer 1080p / 4K | 0.80 / 0.80 | run-level |
+| Chimera 8 / 10-bit | 0.86 / 0.87 | run-level |
+| screen (corpus/long) | 0.82 / 0.83 | run-level |
+
+The averages separate cleanly (gap 0.36), but a **per-call verdict
+sweep exposed the catch**: a single first-row sample is noisy. At a
+0.62 threshold only 73% of dense calls classify dense while 10–16% of
+Chimera/Summer calls *mis*classify as dense — and a false 'dense' on
+long-run content is far costlier (degen is 1.6–4.6x slower there) than
+a missed one on dense content. The risk is asymmetric, so the threshold
+is conservative (0.5): it catches ~47% of dense calls and misfires on
+2–5% of film/screen.
+
+Final (M4 Pro, interleaved A/B, medians of 7), W=32, threshold 0.5,
+sampled once per call:
+
+| clip | vs master | vs run-level (round 2) |
+| --- | --- | --- |
+| dense aomenc motion | **−2%** (regression gone) | −9% |
+| screen 1080p | **−55%** | +2.2% |
+| Chimera 8-bit | **−5%** | +3.2% |
+
+Honest trade: this gives back ~2–3% of the real-content win (pre-sample
+cost + the few mis-sampled calls) to remove the synthetic worst-case
+regression, so **no content class regresses vs master**. It is the
+right default for an upstream MR (regression-free), but the round-2
+run-level path is strictly faster on real content and is recoverable by
+forcing the dense flag to 0 — a profile that never sees adversarial
+dense motion may prefer it. The signal is fundamentally limited by
+per-call noise; a cleaner separation would need per-frame accumulation
+(thread-state, like the retired lazy-projection idea) or an online
+within-call switch after row 0 — recorded for a future pass.
+
+Bit-exactness note: this round touches only `load_tmvs_neon`, so the
+pure-C path is byte-identical to master; both projection paths are
+bit-exact by construction (run length never affects output), which is
+why checkasm passes on every seed regardless of which path the sample
+selects.
+
 ## Tooling notes
 
 - The checkasm bench fixture for load_tmvs is adversarial to exactly
