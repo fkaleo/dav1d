@@ -133,6 +133,50 @@ replaces tbl for both the stride-5 ref gather and the 5-byte pattern
 phases. The dense-content branch discipline is the part to carry
 over, not the instruction selection.
 
+## Industry-clip validation (pts/dav1d inputs, 2026-06-12 evening)
+
+`tests/bench/fetch_realworld.sh` now fetches the four streams the
+Phoronix `pts/dav1d` profile decodes (Netflix Chimera 8/10-bit 1080p,
+Summer Nature 1080p/4K), remuxed to IVF exactly as that profile does.
+They live in `data/realworld/`, outside the routine gate. Validation
+of the full branch (58 commits) against a clean master build on the
+M4 Pro:
+
+- **Bit-exact on all four clips**: full-length SIMD decode at 1 and 4
+  threads, plus 2000-frame pure-C spot checks — 11/11 MATCH.
+- **Wall-clock neutral within noise** (interleaved A/B, pts arguments
+  `--muxer null --filmgrain 0`; medians, branch vs master): at 14
+  threads chimera_8b −1.7%, chimera_10b +1.3%, summer_1080p 0%,
+  summer_4k 0%; at 1 thread all within ±2% except one noisy
+  summer_1080p reading (+3.7%). As expected: the series' wins are
+  1–3% instruction-level and content-class-specific, below single-run
+  wall noise on film content.
+- **load_tmvs on real film content sits in the dense regime**:
+  Chimera 8-bit calls it 19.3k times per 2000 frames at ~2.4% of
+  single-thread decode; the reworked NEON kernel measured ~+3.8%
+  there (356 vs 343 ms, single pair) — i.e. ~+0.09% whole-decoder,
+  invisible in wall-clock, consistent with the +7.5% bound from the
+  aomenc stressor. The screen-content win does not generalize to film
+  content, and the regression does not hurt it measurably either.
+- arm64 CI counters (same evening, after the VEX workaround): the
+  full 7-clip A/B now runs; branch vs master instructions/frame
+  −1.69…−15.38% (screen −15.38% is the NEON rework under cachegrind
+  on Neoverse). One investigated flag, now resolved: smooth-10bit D1
+  read misses +22% per frame (604k → 738k) with last-level misses
+  flat (L1 pressure only, no extra DRAM traffic). A phase-A-only
+  bisect run (skip-LUT + vectorized skip-scan, no run/span rework)
+  measured smooth-10bit D1 at **−7.24%** — i.e. phase A *reduces* it,
+  so the regression is entirely the phase B/C run-find: its two
+  overlapping 16-byte read-ahead loads (`[p-4]`/`[p+1]`, then the
+  q-loads) touch one extra cache line per run boundary, and on
+  smooth-10bit's long runs (avg 52 cells, like screen) that scan
+  reads further ahead than the old per-cell loop. Instructions still
+  drop (−1.69%), LL is flat, and it is bit-exact — an L1-only
+  microarchitectural cost on one intra-heavy content class where
+  load_tmvs is ~6% of decode, not a memory-traffic regression. If it
+  ever matters, bounding the run-find read-ahead to the run length
+  already known from the GPR fast path would remove it.
+
 ## Tooling notes
 
 - The checkasm bench fixture for load_tmvs is adversarial to exactly
