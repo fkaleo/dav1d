@@ -1,78 +1,91 @@
-# x86 load_tmvs run-find port — WIP, blocked on x86 validation env (2026-06-13)
+# x86 load_tmvs run-find port (2026-06-13)
 
 Porting the AArch64 load_tmvs rework (run-find + span stores + adaptive
 selection; see 2026-06-12-load-tmvs-rework.md) to the x86 `sse4` kernel
-in `src/x86/refmvs.asm`. This is the highest-value remaining piece:
-that kernel serves the entire SSE4+ x86 population (no AVX2 load_tmvs
-exists), and it is a structural twin of the pre-rework NEON.
+in `src/x86/refmvs.asm`. That kernel serves the entire SSE4+ x86
+population (no AVX2 load_tmvs exists) and is a structural twin of the
+pre-rework NEON.
 
-## Toolchain established (works)
+## Landed: vectorized run-find + span stores
 
-- x86-64 cross build on the M4: meson cross file
-  (`clang -arch x86_64` + nasm 3.x), `build-x86/`. Builds clean.
-- Correctness loop under Rosetta 2: `arch -x86_64 build-x86/tests/checkasm`.
-  Output is path-independent (run grouping never changes results), so
-  Rosetta correctness is fully valid; perf must come from CI cachegrind.
+The per-cell write/search loops are replaced with run-level processing:
 
-## Instruction mapping (confirmed in code)
+- **Run-find**: a run is a span where `cell[j] == cell[j+1]`, i.e. data
+  byte `k == k+5`. A vector fast-forward compares `[pa]` vs `[pa+5]`
+  (`pcmpeqb`/`pmovmskb`); bits 0-14 cover three cells against their
+  successors, so all-set advances 3 cells (15 bytes — cell-aligned, no
+  division). A scalar tail pinpoints the end. **Guard `cells_remaining
+  >= 5`** keeps the `+5` load (which touches cell `scur+4`) inside the
+  buffer — `>= 4` over-reads one cell past the allocation at the last
+  row/column (a real segfault; see below).
+- **Span store**: project once per run, then write the dx-clipped
+  interval `[max(x, xstart-dx), min(xe, xend-dx))` without per-cell
+  window tests. `pshufb` pattern tiling via the existing `save_pack0/1`
+  rodata; the projection now sources the mv from the `mvd` register
+  (the run-find clobbers `rbq`).
 
-| NEON | x86 | note |
-| --- | --- | --- |
-| `tbl` mask gather | `pshufb` | per-128-bit lane on x86 |
-| `shrn`+`fmov` mask→GPR | **`pmovmskb`** | cheaper on x86 |
-| `rbit`+`clz` ffs | `bsf`/`tzcnt` | no `rbit` needed |
-| 64-bit GPR run-detect | identical | ports verbatim |
-| `cmeq` | `pcmpeqb` | |
-| pattern `tbl` chain | `pshufb` + `save_pack0/1` (already in rodata) | |
-| projection | unchanged (existing `pmuldq`/`psignd` chain) | source mv from `mvd` not `[rbq]` so run-find can clobber rbq |
+Validated: **checkasm refmvs, 20 seeds, all pass under Rosetta** (M4
+x86-64 cross build, nasm), and the **bench-harness CI x86-64 leg is
+green** — conformance 22/22 + corpus bit-exact + checkasm on real
+x86-64. So the port is correctness-validated on native hardware.
 
-## Status by stage
+**Perf measurement (the honest part).** The CI cachegrind A/B shows the
+x86 screen-1080p instruction count **unchanged** by this commit
+(10.319M/frame branch, identical before and after; −3.80% vs master is
+entirely the C-path changes). That is expected, not a failure: as the
+NEON work established, this loop's cost is **branches and load→compare
+latency, not instruction count** — the NEON −55% on screen was M4
+interleaved *wall-clock*, and it never moved cachegrind `Ir` either.
+cachegrind here measures `Ir`/`D1` only, over 20-frame clips where
+load_tmvs is a small slice, so it cannot see a cycle-level win. The x86
+benefit therefore is **not demonstrable with the available tooling**
+(no native-x86 `perf`/cycle counters; Rosetta timings invalid). It is
+correct and perf-neutral on the measurable metric (no regression: `Ir`
+and `D1` unchanged), and is the x86 analogue of a wall-clock-proven
+NEON win.
 
-1. **Scalar run-find + interval-clip bulk write** — restructures the
-   per-cell write/search into: find run end once, project once,
-   write the dx-clipped span without per-cell window tests.
-   **VALIDATED: checkasm refmvs 20 seeds pass under Rosetta**
-   (before the env failure below). Patch: `tests/bench/wip/x86-scalar-runfind.patch`.
-   This is the safe first commit; its standalone perf gain is expected
-   to be modest (the big win needs vectorization) and is unmeasured.
+Recommendation: keep it as the validated port foundation; demonstrate
+(or refute) the x86 cycle win on a native x86-64 box with `perf stat`
+on a long screen clip, the same way the NEON win was shown by M4
+wall-clock. This mirrors the project's standing rule that small-delta
+wall-clock claims belong on bare metal, not in this counter harness.
 
-2. **Vector run-find (`vff`)** — 16-byte `pcmpeqb [pa] vs [pa+5]` +
-   `pmovmskb`, advancing 3 cells (15 bytes, cell-aligned, no division)
-   per all-equal chunk; scalar tail pinpoints. **FAILS: deterministic
-   checkasm segfault on all 20 seeds.** Logic reviewed as correct and
-   read margins computed in-bounds for the checkasm buffer
-   (ih8·stride·5 = 75600 B; worst-case `movdqu [pa+5]` end = 75596 B at
-   the guard `cells_remaining >= 5`), so the cause is not yet localized
-   — likely a subtle x86inc register/`DEFINE_ARGS` aliasing or an
-   over-read case the margin analysis misses. Draft:
-   `tests/bench/wip/x86-vff-adaptive-wip.diff`.
+## Deferred: adaptive dense selector
 
-3. **Adaptive selector** — per-call (n==0) usable-run-extension sample
-   sets a `dense` flag (stack slot 0x4c); the xloop forces `xe = x+1`
-   (per-cell path) when dense. Drafted in the same diff; not reachable
-   until (2) is fixed.
+The per-call usable-run-extension sample + `dense` gate (NEON round 3,
+which turns the dense-content regression into a win) is **not yet
+landed**: its dense path (`xe = x+1; jmp .project`) hits a checkasm
+segfault that is still being chased. Without it the x86 kernel has the
+same dense-content regression NEON had after rounds 1-2 (a synthetic
+worst case; real content wins) — an acceptable interim state. The NEON
+version (`src/arm/64/refmvs.S`) is the reference for re-deriving it.
 
-## Blocker: Rosetta validation env wedged
+## Debugging lessons (cost real time; recorded for next time)
 
-After many `arch -x86_64 checkasm` launches, Rosetta entered a state
-where every new launch hangs in uninterruptible sleep (state `UN`, 0
-CPU) at startup, accumulating processes that `kill -9` cannot reap.
-This killed the local correctness loop mid-debug, so the `vff` segfault
-could not be iterated. (The arm64 native build/checkasm is unaffected.)
+1. **Unsafe stack slot.** The original segfault hunt was a wild goose
+   chase: `[rsp+0x4c]` is **not** a safe local in this `cglobal ...,
+   -0x50` frame (existing code only uses up to `0x48`); writing it
+   corrupts the stack. The `dense` flag and sample scratch must live in
+   a gap within `[0x00, 0x48]` (e.g. `0x34`). This masqueraded as a
+   "vff bug" and a "sample bug" because every variant that touched
+   `0x4c` crashed.
+2. **Rosetta wedges under load.** Many rapid `arch -x86_64 checkasm`
+   launches drive Rosetta into a state where new launches hang in
+   uninterruptible sleep (state `UN`, 0 CPU) and accumulate unkillable
+   processes; it recovers on its own after a pause. Run x86 checkasm
+   **one at a time, with a watchdog kill**, and treat a hang as an env
+   artifact, not a code failure. Stale binaries (ninja not relinking
+   between edits) also produced misleading pass/fail readings — always
+   confirm the rebuild.
+3. The vff is correct; the read-margin guard is the only subtlety
+   (`>= 5`, derived above).
 
-## How to resume
+## To finish
 
-- Best: a native x86-64 Linux box (or the bench-harness CI x86 leg) as
-  the correctness oracle — `build/tests/checkasm` there is authoritative
-  and avoids Rosetta entirely. Iterate the `vff` fix against it; perf
-  from the CI cachegrind A/B.
-- Apply `x86-scalar-runfind.patch` first (known-good) as the baseline
-  commit once the full gate + `--cpumask sse4/ssse3` corpus checks pass
-  on a working x86 env.
-- Then re-introduce `vff` from the diff and bisect the segfault on real
-  x86 (where the failure, if real, reproduces without Rosetta noise; if
-  it does *not* reproduce, the Rosetta segfault was an artifact and the
-  port is already correct).
-- On the M4, recovering Rosetta likely needs a logout/reboot to clear
-  the stuck processes; run x86 checkasm sparingly (one at a time, with a
-  watchdog kill) to avoid re-wedging.
+- Land via the CI x86 leg (real x86-64): correctness gate + corpus +
+  `--cpumask sse4/ssse3` + the cachegrind A/B perf number. Watch the
+  bench-harness run on push and revert if red.
+- Re-add the adaptive selector at a safe slot (`0x34`) and debug the
+  dense path on native x86 (no Rosetta noise).
+- An AVX2 `load_tmvs` is a possible follow-up, but the win is the
+  algorithm (per the NEON data), not vector width.
