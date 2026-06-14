@@ -57,25 +57,48 @@ on a long screen clip, the same way the NEON win was shown by M4
 wall-clock. This mirrors the project's standing rule that small-delta
 wall-clock claims belong on bare metal, not in this counter harness.
 
-## Deferred: adaptive dense selector
+## Landed: adaptive dense selector (2026-06-14)
 
-The per-call usable-run-extension sample + `dense` gate (NEON round 3,
-which turns the dense-content regression into a win) is **not yet
-landed**: its dense path (`xe = x+1; jmp .project`) hits a checkasm
-segfault that is still being chased. Without it the x86 kernel has the
-same dense-content regression NEON had after rounds 1-2 (a synthetic
-worst case; real content wins) — an acceptable interim state. The NEON
-version (`src/arm/64/refmvs.S`) is the reference for re-deriving it.
+The per-call usable-run-extension sample + `dense` gate (NEON round 3)
+**landed in `3402cbad`** (checkasm refmvs, 20 seeds). The dense-path
+"segfault" referenced earlier was never a code bug — it was the same
+stack-slot aliasing as the original `0x4c` hunt: the dense flag at
+`0x34` overwrites the **high 32 bits of the `stride` qword at `0x30`**,
+so `dense=1` set `stride = 0x1_000000f0` and the span wrote to a wild
+dst (lldb: faulting dst, then the corrupted `[rsp+0x30]`). The function
+packs qword locals (rf@0x48, stride@0x30) next to dwords, so **no dword
+slot inside `[0x00,0x4f]` that lands in a qword's high half is safe**.
+Fixed by growing the frame to `-0x60` and using genuinely-free dword
+slots `0x50/0x54/0x58`. NEON energy: adaptive −0.7% vs run-level on the
+dense stressor (small at whole-decoder; load_tmvs is ~2.4% there).
+
+## Attempted, deferred: skip-scan (phase A, pshufb-gather)
+
+The vectorized skip of unusable cells (NEON phase A) was implemented:
+5 `pshufb` masks gather the stride-5 ref bytes of 16 cells, a per-`n`
+`pshufb` usable table maps them, `pmovmskb`+`tzcnt` find the first
+usable cell; scalar fallback when <16 cells remain. It passes **18/20
+checkasm seeds** but two (1234, 31337) give a wrong result (not a
+segfault) — a subtle edge case the gather/table review did not catch,
+and checkasm in this build does not print the mismatch coordinates to
+localize it. **Deferred**, because (a) it needs a debugger that shows
+the mismatched cell (or a native x86 run) to crack, and (b) its benefit
+is unmeasurable here anyway (cycle-level, no native-x86 `perf`). The
+WIP is saved as a patch in the session tmp
+(`x86-skipscan-wip.patch`); the run-find + span + adaptive that ship
+are the validated, valuable part. Without phase A, x86 still skips
+unusable cells per-cell (as upstream did).
 
 ## Debugging lessons (cost real time; recorded for next time)
 
-1. **Unsafe stack slot.** The original segfault hunt was a wild goose
-   chase: `[rsp+0x4c]` is **not** a safe local in this `cglobal ...,
-   -0x50` frame (existing code only uses up to `0x48`); writing it
-   corrupts the stack. The `dense` flag and sample scratch must live in
-   a gap within `[0x00, 0x48]` (e.g. `0x34`). This masqueraded as a
-   "vff bug" and a "sample bug" because every variant that touched
-   `0x4c` crashed.
+1. **Unsafe stack slot (×2).** The function packs qword locals next to
+   dwords; a dword flag that lands in a qword's **high half** silently
+   corrupts that qword. `0x4c` overlaps `rf`@`0x48`; `0x34` overlaps
+   `stride`@`0x30`. Both produced wild-pointer segfaults that
+   masqueraded as "vff bug" / "sample bug" / "dense-path bug". The fix
+   is to grow the frame (`-0x60`) and use slots that don't overlap any
+   qword (`0x50/0x54/0x58`). Lesson: before reusing a stack gap, check
+   it isn't the high half of an 8-byte local.
 2. **Rosetta wedges under load.** Many rapid `arch -x86_64 checkasm`
    launches drive Rosetta into a state where new launches hang in
    uninterruptible sleep (state `UN`, 0 CPU) and accumulate unkillable
@@ -89,10 +112,13 @@ version (`src/arm/64/refmvs.S`) is the reference for re-deriving it.
 
 ## To finish
 
-- Land via the CI x86 leg (real x86-64): correctness gate + corpus +
-  `--cpumask sse4/ssse3` + the cachegrind A/B perf number. Watch the
-  bench-harness run on push and revert if red.
-- Re-add the adaptive selector at a safe slot (`0x34`) and debug the
-  dense path on native x86 (no Rosetta noise).
+- Debug the skip-scan's 2/20 wrong-result on a native x86-64 box (or a
+  build whose checkasm prints the mismatched cell) — apply
+  `x86-skipscan-wip.patch` to the committed kernel. The masks and table
+  reviewed as correct, so the bug is likely a boundary in the skip16
+  loop or an off-by-one in the window, not the gather.
+- Quantify the run-find/adaptive (and, once fixed, skip-scan) cycle win
+  on native x86-64 with `perf stat` — cachegrind `Ir` cannot see it,
+  and the NEON energy result (−10.3% screen) is the analogue to confirm.
 - An AVX2 `load_tmvs` is a possible follow-up, but the win is the
   algorithm (per the NEON data), not vector width.
