@@ -362,7 +362,7 @@ cglobal splat_mv, 4, 5, 3, rr, a, bx4, bw4, bh4
 INIT_XMM sse4
 ; refmvs_frame *rf, int tile_row_idx,
 ; int col_start8, int col_end8, int row_start8, int row_end8
-cglobal load_tmvs, 6, 15, 8, -0x50, rf, tridx, xstart, xend, ystart, yend, \
+cglobal load_tmvs, 6, 15, 8, -0x60, rf, tridx, xstart, xend, ystart, yend, \
                                     stride, rp_proj, roff, troff, \
                                     xendi, xstarti, iw8, ih8, dst
     xor           r14d, r14d
@@ -436,6 +436,7 @@ cglobal load_tmvs, 6, 15, 8, -0x50, rf, tridx, xstart, xend, ystart, yend, \
     imul            r9, strideq     ; ystart * stride
     mov     [rsp+0x48], rfq
     mov     [rsp+0x18], stride5q
+    mov dword [rsp+0x50], 0         ; adaptive `dense` flag (default: run-find)
     lea             r7, [r9*5]
     mov     [rsp+0x24], ystartd
     mov     [rsp+0x00], r7
@@ -453,6 +454,57 @@ cglobal load_tmvs, 6, 15, 8, -0x50, rf, tridx, xstart, xend, ystart, yend, \
     mov        rp_refq, [rfq+rf.rp_ref]
     movq            m2, refsignq
     add           offq, [rp_refq+refq*8]    ; r = rp_ref[ref] + row_offset
+    ; --- adaptive pre-sample (n == 0; run density is a frame property) ---
+    ; among up to 32 usable cells of the first row, the fraction whose right
+    ; neighbour is identical; below 0.5 => dense => per-cell path. Slots
+    ; 0x50/0x54/0x58 are clean dwords (0x34/0x4c overlap qword locals).
+    test            nd, nd
+    jnz .skip_sample
+    xor           r12d, r12d                 ; usable bitmask
+    mov           refd, 1
+.us_build:
+    cmp     byte [n7q+refq], 0
+    je .us_skip
+    bts           r12d, refd
+.us_skip:
+    inc           refd
+    cmp           refd, 8
+    jl .us_build
+    mov           r13d, xendid
+    sub           r13d, xstartid
+    sub           r13d, 2                     ; pairs, less read-ahead slack
+    jle .skip_sample
+    cmp           r13d, 32
+    jle .w_ok
+    mov           r13d, 32                    ; W = min(pairs, 32)
+.w_ok:
+    lea           refq, [xstartiq+xstartiq*4] ; xstarti * 5
+    lea        rp_refq, [offq+refq]           ; p = &r[ystart][xstarti]
+    mov dword [rsp+0x54], 0                   ; use_n
+    mov dword [rsp+0x58], 0                   ; use_ext
+.samp:
+    movzx         refd, byte [rp_refq+4]      ; cell ref
+    bt            r12d, refd
+    jnc .samp_next
+    inc dword [rsp+0x54]                      ; use_n++
+    mov       refsignd, [rp_refq]             ; mv
+    cmp       refsignd, [rp_refq+5]
+    jne .samp_next
+    mov       refsignb, [rp_refq+4]           ; ref
+    cmp       refsignb, [rp_refq+9]
+    jne .samp_next
+    inc dword [rsp+0x58]                      ; use_ext++
+.samp_next:
+    add        rp_refq, 5
+    dec           r13d
+    jg .samp
+    mov           refd, [rsp+0x58]
+    add           refd, refd                  ; use_ext * 2
+    cmp           refd, [rsp+0x54]            ; vs use_n
+    setl          refb
+    movzx         refd, refb
+    mov     [rsp+0x50], refd                   ; dense iff use_ext/use_n < 0.5
+.skip_sample:
     mov     [rsp+0x14], nd
     mov             yd, ystartd
 .yloop:
@@ -480,6 +532,12 @@ cglobal load_tmvs, 6, 15, 8, -0x50, rf, tridx, xstart, xend, ystart, yend, \
     test      ref2refd, ref2refd
     jz .next_x_bad_ref
     mov            mvd, [rbq]                 ; b_mv
+    cmp dword [rsp+0x50], 0                       ; adaptive: dense -> per-cell
+    je .rf_run
+    lea            r5d, [xd+1]
+    mov     [rsp+0x08], r5d                        ; dense: xe = x + 1
+    jmp .project
+.rf_run:
     ; --- run-find: xe = exclusive end of the run of cells == cell[x] ---
     ; Vector fast-forward: a run is a span where cell[j] == cell[j+1], i.e.
     ; data byte k == byte k+5. Compare [pa] vs [pa+5]; bits 0-14 cover the
