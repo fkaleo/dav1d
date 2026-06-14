@@ -74,6 +74,31 @@ honest cross-platform finding: the same patch series is energy-positive
 on x86 (memory-bound) but, on this clip set, only the compute-bound
 load_tmvs win converts to energy on Apple Silicon.
 
+## Generalization across screen clips (master vs branch, ~7 s windows)
+
+| clip | combined energy/frame | vs master | wall |
+| --- | --- | --- | --- |
+| screen-long (synthetic, 1500f) | 3.25 mJ | **−14.5%** | −12% |
+| screen-1080p (synthetic, corpus) | 4.77 mJ | **−13.2%** | −11% |
+| real-screen-1080p (real capture) | 17.5 mJ | **−2.6%** | −4.6% |
+
+The win scales with how static/repetitive the screen content is: synthetic
+testsrc-style screens are heavily load_tmvs-bound (−13..−14.5%), a real
+screen-capture clip with more motion has a smaller load_tmvs share and a
+smaller win (−2.6%). Still net-positive everywhere screen content uses
+ref-frame MVs. (Short ~2 s windows gave unstable energy — power
+attribution needs ≥~6 s of sustained decode; the numbers above use 7 s
+windows.)
+
+## Adaptive selector on dense content
+
+The adaptive dense selector (NEON round 3) vs the non-adaptive run-level
+path, on the dense-motion aomenc stressor (the load_tmvs worst case):
+**combined −0.7% energy, wall −0.9%.** Small at whole-decoder level
+because load_tmvs is only ~2.4% of that coefficient-heavy clip, but
+net-positive — the selector turns the run-level path's dense regression
+into a slight win, confirmed in joules.
+
 ## Takeaways
 
 - First joules-level validation for the project: the load_tmvs rework
