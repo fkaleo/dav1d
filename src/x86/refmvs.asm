@@ -362,7 +362,7 @@ cglobal splat_mv, 4, 5, 3, rr, a, bx4, bw4, bh4
 INIT_XMM sse4
 ; refmvs_frame *rf, int tile_row_idx,
 ; int col_start8, int col_end8, int row_start8, int row_end8
-cglobal load_tmvs, 6, 15, 4, -0x50, rf, tridx, xstart, xend, ystart, yend, \
+cglobal load_tmvs, 6, 15, 8, -0x50, rf, tridx, xstart, xend, ystart, yend, \
                                     stride, rp_proj, roff, troff, \
                                     xendi, xstarti, iw8, ih8, dst
     xor           r14d, r14d
@@ -472,77 +472,154 @@ cglobal load_tmvs, 6, 15, 4, -0x50, rf, tridx, xstart, xend, ystart, yend, \
     mov             xd, [rsp+0x20] ; xstarti
 .xloop:
     lea            rbd, [xq*5]
-    add            rbq, srcq
+    add            rbq, srcq                 ; rbq = &r[x] (cell start, .ref at +4)
     movzx         refd, byte [rbq+4]
     test          refd, refd
     jz .next_x_bad_ref
-    movzx     ref2refd, byte [n7q+refq]     ; rf->mfmv_ref2ref[n][b_ref-1]
+    movzx     ref2refd, byte [n7q+refq]      ; rf->mfmv_ref2ref[n][b_ref-1]
     test      ref2refd, ref2refd
     jz .next_x_bad_ref
+    mov            mvd, [rbq]                 ; b_mv
+    ; --- run-find: xe = exclusive end of the run of cells == cell[x] ---
+    ; Vector fast-forward: a run is a span where cell[j] == cell[j+1], i.e.
+    ; data byte k == byte k+5. Compare [pa] vs [pa+5]; bits 0-14 cover the
+    ; three cells scur..scur+2 against their successors, so when all are set
+    ; cells scur..scur+3 are equal and we advance 3 cells (15 bytes, staying
+    ; cell-aligned -> no division). Scalar finishes the tail / pinpoints.
+    mov            r5d, xd                      ; scur = x  (r5 = 'rf')
+    mov          fracq, rbq                     ; pa = &r[scur]
+.rf_vff:
+    mov            rbd, xendid
+    sub            rbd, r5d                      ; cells remaining from scur
+    cmp            rbd, 5
+    jl .rf_sc
+    movdqu          m4, [fracq]
+    movdqu          m5, [fracq+5]
+    pcmpeqb         m4, m5
+    pmovmskb       rbd, m4
+    and            rbd, 0x7fff                   ; cells scur..scur+2 vs successors
+    cmp            rbd, 0x7fff
+    jne .rf_sc                                   ; a mismatch among them
+    add          fracq, 15
+    add            r5d, 3
+    jmp .rf_vff
+.rf_sc:                                          ; examine cell[scur+1]
+    lea            rbd, [r5d+1]                  ; scur+1
+    cmp            rbd, xendid
+    jge .rf_done                                 ; xe = scur+1 = xendi
+    cmp           refb, byte [fracq+9]           ; cell[scur+1].ref
+    jne .rf_done
+    cmp            mvd, [fracq+5]                ; cell[scur+1].mv
+    jne .rf_done
+    add          fracq, 5
+    mov            r5d, rbd                      ; scur = scur+1
+    jmp .rf_sc
+.rf_done:
+    mov     [rsp+0x08], rbd                      ; xe = scur+1 (or xendi)
+.project:
+    ; --- projection (depends only on b_mv; shared by the whole run) ---
     lea          fracq, [mv_proj]
     movzx        fracd, word [fracq+ref2refq*2]
-    mov            mvd, [rbq]
-    imul         fracd, [rsp+0x40] ; ref2cur
-    pmovsxwq        m0, [rbq]
+    imul         fracd, [rsp+0x40]            ; ref2cur
+    movd            m0, mvd                   ; b_mv (run-find clobbered rbq)
+    pmovsxwq        m0, m0                    ; sign-extend mv.x, mv.y
     movd            m1, fracd
     punpcklqdq      m1, m1
-    pmuldq          m0, m1          ; mv * frac
+    pmuldq          m0, m1                     ; mv * frac
     pshufd          m1, m0, q3311
     paddd           m0, m3
     paddd           m0, m1
-    psrad           m0, 14          ; offset = (xy + (xy >> 31) + 8192) >> 14
+    psrad           m0, 14                     ; offset = (xy + (xy >> 31) + 8192) >> 14
     pabsd           m1, m0
     packssdw        m0, m0
     psrld           m1, 6
     packuswb        m1, m1
-    pxor            m0, m2          ; offset ^ ref_sign
-    psignd          m1, m0          ; apply_sign(abs(offset) >> 6, offset ^ refsign)
+    pxor            m0, m2                     ; offset ^ ref_sign
+    psignd          m1, m0                     ; apply_sign(abs(offset) >> 6, offset ^ refsign)
     movq          mvxq, m1
-    lea           mvyd, [mvxq+yq]   ; ypos
-    sar           mvxq, 32
- DEFINE_ARGS y, src, xstart, xend, _, _, n7, mv, \
-             ref, x, xendi, mvx, ypos, rb, ref2ref
-    cmp          yposd, [rsp+0x44] ; y_proj_start
-    jl .next_x_bad_pos_y
-    cmp          yposd, [rsp+0x3c] ; y_proj_end
-    jge .next_x_bad_pos_y
-    and          yposd, 15
-    add           mvxq, xq          ; xpos
-    imul         yposq, [rsp+0x30]  ; pos = (ypos & 15) * stride
- DEFINE_ARGS y, src, xstart, xend, dst, _, n7, mv, \
-             ref, x, xendi, xpos, pos, rb, ref2ref
-    mov           dstq, [rsp+0x28]  ; dst = rp_proj + tile_row_offset
-    add           posq, xposq       ; pos += xpos
-    lea           posq, [posq*5]
-    add           dstq, posq        ; dst += pos5
-    jmp .write_loop_entry
-.write_loop:
+    lea           mvyd, [mvxq+yq]              ; ypos = y + offset.y
+    sar           mvxq, 32                     ; dx = offset.x  (sign-extended)
+    ; --- y-window: gates whether the run is written; x advances to xe regardless
+    cmp           mvyd, [rsp+0x44]             ; y_proj_start
+    jl .span_skip
+    cmp           mvyd, [rsp+0x3c]             ; y_proj_end
+    jge .span_skip
+    ; dx in [-8, 8] => the per-cell sb-aligned window reduces to one interval
+    cmp           mvxd, 8
+    jg .span_percell
+    cmp           mvxd, -8
+    jl .span_percell
+    mov            r5d, xstartd
+    sub            r5d, mvxd                   ; xstart - dx
+    cmp            r5d, xd
+    cmovl          r5d, xd                     ; vs = max(x, xstart - dx)   (r5 = 'rf')
+    mov          fracd, xendd
+    sub          fracd, mvxd                   ; xend - dx
+    mov            rbd, [rsp+0x08]             ; xe
+    cmp          fracd, rbd
+    cmovg        fracd, rbd                    ; ve = min(xe, xend - dx)
+    cmp          fracd, r5d
+    jle .span_done                             ; ve <= vs: nothing to write
+    sub          fracd, r5d                    ; count = ve - vs
+    mov            rbd, mvyd
+    and            rbd, 15
+    imul           rbq, [rsp+0x30]             ; (ypos & 15) * stride
+    add            rbq, r5q                    ; + vs
+    add            rbq, mvxq                   ; + dx   (xpos of first written cell)
+    lea            rbq, [rbq*5]
+    add            rbq, [rsp+0x28]             ; dst = rp_proj_base + xpos5
+.span_write:
+    mov          [rbq+0], mvd
+    mov     byte [rbq+4], ref2refb
     add            rbq, 5
-    cmp           refb, byte [rbq+4]
-    jne .xloop
-    cmp            mvd, [rbq]
-    jne .xloop
-    add           dstq, 5
-    inc          xposd
-.write_loop_entry:
-    mov           r12d, xd
-    and           r12d, ~7
-    lea            r5d, [r12-8]
-    cmp            r5d, xstartd
-    cmovs          r5d, xstartd     ; x_proj_start
-    cmp          xposd, r5d
-    jl .next_xpos
-    add           r12d, 16
-    cmp          xendd, r12d
-    cmovs         r12d, xendd       ; x_proj_end
-    cmp          xposd, r12d
-    jge .next_xpos
-    mov       [dstq+0], mvd
-    mov  byte [dstq+4], ref2refb
-.next_xpos:
-    inc             xd
+    dec          fracd
+    jg .span_write
+.span_done:
+    mov             xd, [rsp+0x08]             ; x = xe
     cmp             xd, xendid
-    jl .write_loop
+    jl .xloop
+    jmp .next_y
+.span_skip:
+    mov             xd, [rsp+0x08]             ; x = xe (y-window miss, no writes)
+    cmp             xd, xendid
+    jl .xloop
+    jmp .next_y
+.span_percell:
+    ; rare-ish (|dx| > 8): per-cell window check over [x, xe)
+    mov            rbd, xd                      ; xi
+.pc_loop:
+    mov            r5d, rbd
+    and            r5d, ~7                      ; xi_sb
+    mov          fracd, r5d
+    sub          fracd, 8
+    cmp          fracd, xstartd
+    cmovl        fracd, xstartd                 ; lo = max(xi_sb - 8, xstart)
+    add            r5d, 16
+    cmp            r5d, xendd
+    cmovg          r5d, xendd                   ; hi = min(xi_sb + 16, xend)
+    mov     [rsp+0x10], r5d                      ; stash hi
+    lea            r5d, [rbq+mvxq]               ; xpos = xi + dx
+    cmp            r5d, fracd
+    jl .pc_next
+    cmp            r5d, [rsp+0x10]
+    jge .pc_next
+    ; dst = rp_proj_base + ((ypos&15)*stride + xpos) * 5
+    mov          fracd, mvyd
+    and          fracd, 15
+    imul         fracq, [rsp+0x30]
+    add          fracq, r5q                      ; + xpos
+    lea          fracq, [fracq*5]
+    add          fracq, [rsp+0x28]
+    mov          [fracq+0], mvd
+    mov     byte [fracq+4], ref2refb
+.pc_next:
+    inc            rbd
+    cmp            rbd, [rsp+0x08]               ; xi < xe
+    jl .pc_loop
+    mov             xd, [rsp+0x08]               ; x = xe
+    cmp             xd, xendid
+    jl .xloop
+    jmp .next_y
 .next_y:
  DEFINE_ARGS y, src, xstart, xend, ystart, _, n7, _, _, x, xendi, _, _, _, n
     add           srcq, [rsp+0x18] ; stride5
@@ -558,18 +635,6 @@ cglobal load_tmvs, 6, 15, 4, -0x50, rf, tridx, xstart, xend, ystart, yend, \
     jne .nloop
 .ret:
     RET
-.next_x:
- DEFINE_ARGS y, src, xstart, xend, _, _, n7, mv, ref, x, xendi, _, _, rb, _
-    add            rbq, 5
-    cmp           refb, byte [rbq+4]
-    jne .xloop
-    cmp            mvd, [rbq]
-    jne .xloop
-.next_x_bad_pos_y:
-    inc             xd
-    cmp             xd, xendid
-    jl .next_x
-    jmp .next_y
 .next_x_bad_ref:
     inc             xd
     cmp             xd, xendid
