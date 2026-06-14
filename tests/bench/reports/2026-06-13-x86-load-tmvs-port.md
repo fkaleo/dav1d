@@ -29,6 +29,13 @@ x86-64 cross build, nasm), and the **bench-harness CI x86-64 leg is
 green** — conformance 22/22 + corpus bit-exact + checkasm on real
 x86-64. So the port is correctness-validated on native hardware.
 
+*Correction (2026-06-14):* the original landing commit `dc61967a` only
+staged the docs/wip cleanup — `src/x86/refmvs.asm` was never committed,
+so that run's green tested the **unchanged** upstream kernel. The asm
+was actually landed in `6fa73fcc`; the green referenced above is the
+CI run on that commit, which is the first one that genuinely exercises
+the change.
+
 **Perf measurement (the honest part).** The CI cachegrind A/B shows the
 x86 screen-1080p instruction count **unchanged** by this commit
 (10.319M/frame branch, identical before and after; −3.80% vs master is
